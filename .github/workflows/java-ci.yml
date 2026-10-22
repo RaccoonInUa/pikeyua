@@ -26,3 +26,11 @@ jobs:
           gradle-version: '8.8'
       - name: Test and assemble
         run: gradle --no-daemon test shadowJar
+      - name: Upload test-only ARM-compatible Java JAR
+        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/v7.1-persistence'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pikeyua-v7.1-candidate-jdk17
+          path: build/libs/pikeyua.jar
+          if-no-files-found: error
+          retention-days: 7
