@@ -15,6 +15,8 @@ A research-grade USB FIDO2 authenticator for Raspberry Pi Zero W, derived from [
 
 **Unknown:** The original silent `config.json` failure may involve Gson serialization, not just swallowed background exceptions. The new path fails visibly, but is not considered fixed until the actual Pi has successfully written and reloaded credentials. No device installation has been performed.
 
+The V7.1 core deliberately excludes the optional OLED Bonnet / Pi4J dependency, unavailable in Maven Central. If `enableBonnet=true`, startup fails explicitly rather than silently falling back to auto-approval. The default headless mode retains V6's laboratory-only automatic presence approval.
+
 ## Build / development
 
 Recommended: JDK 17 and Gradle **8.8** on the Mac. Run:

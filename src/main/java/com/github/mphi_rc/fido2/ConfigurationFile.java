@@ -23,7 +23,6 @@ import com.github.mphi_rc.fido2.authenticator.crypto.GsonAdaptersEd25519Attestat
 import com.github.mphi_rc.fido2.authenticator.crypto.GsonAdaptersP256AttestationKeyPair;
 import com.github.mphi_rc.fido2.authenticator.user.AlwaysAllowUserVerifier;
 import com.github.mphi_rc.fido2.authenticator.user.UserVerifier;
-import com.github.mphi_rc.fido2.authenticator.user.adafruit.Adafruit3531UserVerifier;
 import com.github.mphi_rc.gson.AttestationKeyPairTypeAdapter;
 import com.github.mphi_rc.gson.Base64TypeAdapter;
 import com.github.mphi_rc.gson.MillisTypeAdapter;
@@ -73,11 +72,8 @@ public final class ConfigurationFile implements Configuration {
 
     public UserVerifier userVerifier() {
         if (config.enableBonnet()) {
-            try {
-                return new Adafruit3531UserVerifier();
-            } catch (Exception e) {
-                log.error("Cannot instantiate Adafruit Bonnet hardware", e);
-            }
+            throw new UnsupportedOperationException(
+                "OLED Bonnet verification is not included in the V7.1 headless build");
         }
         return new AlwaysAllowUserVerifier();
     }
