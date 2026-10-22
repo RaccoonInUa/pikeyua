@@ -27,6 +27,16 @@ gradle test shadowJar
 
 The historic wrapper shell script is retained, but this source-only repository does not yet contain the historical binary `gradle-wrapper.jar`; `./gradlew` will require a newly generated, verified wrapper first. Do not assume builds are validated merely because source is committed.
 
+## Isolated Raspberry Pi serialization smoke test
+
+After copying the **candidate** shadow JAR to a separate test location on the Pi, run:
+
+```sh
+java -cp pikeyua.jar com.github.mphi_rc.fido2.StateSmokeTest
+```
+
+This test requires the Pi's UDC to exist, but **does not bind the USB controller or touch the running V6 service**. It uses a unique private temporary directory and removes its synthetic state afterward. It checks serialization, reload, AAGUID identity, generated test credential, signature counter and a dummy PIN hash. **No live FIDO credential is used.**
+
 ## Deployment prerequisites (after build/tests)
 
 The working V6 installation must not be overwritten until V7.1 has passed independent persistence tests. For an isolated test Pi, provision a private persistent directory:

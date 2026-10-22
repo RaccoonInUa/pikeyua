@@ -11,3 +11,7 @@ This is a controlled test plan. **Do not deploy to the running V6 key yet.**
 7. Verify that no private state, PIN, token, secret or build output is committed.
 
 The original V6 binary has not been compared byte-for-byte to its reconstructed source. Functional regressions are possible. The first end-to-end tests must happen in an isolated installation.
+
+## Isolated no-downtime test on Pi
+
+Run `java -cp pikeyua.jar com.github.mphi_rc.fido2.StateSmokeTest` against the newly built V7.1 test JAR. This does not invoke the FIDO gadget or stop V6. The required output is `PASS: ARMv6 authenticator state, credential, counter, PIN and AAGUID round-trip.` A failure should include an exception and must be resolved before deployment.
