@@ -75,6 +75,7 @@ public class ConfigFs {
 	}
 
 	public void attach(UsbHidGadget gadget, UsbDeviceController driver) throws IOException {
+		driver.requireAvailable();
 		Path gadgetRoot = getGadgetRoot(gadget.name());
 		byte[] udcConfig = readConfig(gadgetRoot, "UDC");
 

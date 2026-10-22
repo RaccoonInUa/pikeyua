@@ -26,8 +26,19 @@ public interface UsbDeviceController {
 
 	@Value.Check
 	default void check() {
+		Preconditions.checkArgument(
+			name() != null && name().matches("[A-Za-z0-9][A-Za-z0-9._-]*"),
+			"Invalid USB controller name");
+	}
+
+	/**
+	 * Hardware checks belong at USB gadget attachment time, not during
+	 * state deserialization or offline credential validation.
+	 */
+	default void requireAvailable() {
 		Path udcPath = Paths.get("/sys/class/udc/", name());
-		Preconditions.checkState(Files.isDirectory(udcPath), "Chosen USB device controller is unavailable");
+		Preconditions.checkState(Files.isDirectory(udcPath),
+			"Chosen USB device controller is unavailable");
 	}
 
 }

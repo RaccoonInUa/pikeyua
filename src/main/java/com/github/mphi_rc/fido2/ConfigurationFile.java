@@ -31,6 +31,8 @@ import com.github.mphi_rc.usb.gadget.GsonAdaptersUsbDeviceController;
 import com.github.mphi_rc.usb.gadget.UsbDeviceController;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * State owner. Credential and PIN updates are durably written before exposing
@@ -153,6 +155,14 @@ public final class ConfigurationFile implements Configuration {
         }
         try {
             String json = new String(AtomicStateFile.read(configFile), StandardCharsets.UTF_8);
+            JsonObject object = new JsonParser().parse(json).getAsJsonObject();
+            // Never silently regenerate an identity or discard credentials
+            // when a partially written or incomplete state is loaded.
+            if (!object.has("id") || object.get("id").isJsonNull()
+                    || !object.has("credentials")
+                    || !object.get("credentials").isJsonArray()) {
+                throw new IllegalStateException("Incomplete authenticator state");
+            }
             Configuration restored = gson.fromJson(json, Configuration.class);
             if (restored == null) {
                 throw new IllegalStateException("Empty authenticator state");
