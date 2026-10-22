@@ -16,8 +16,8 @@ import com.github.mphi_rc.fido2.authenticator.crypto.P256AttestationKeyPair;
 /**
  * Isolated ARMv6 integration smoke test. Does not attach a gadget, talk to HID,
  * read the running service state, or modify any production authenticator keys.
- * Requires the Raspberry Pi's UDC to exist because the upstream Configuration
- * model validates that controller during construction.
+ * Does not require UDC. The runtime checks USB availability only when attaching
+ * an actual gadget, not during credential serialization.
  */
 public final class StateSmokeTest {
     private StateSmokeTest() { }
