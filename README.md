@@ -1,29 +1,44 @@
 # pikeyua
 
-Experimental FIDO2 USB authenticator for Raspberry Pi Zero W. Based on [mphi-rc/pi-zero-security-key](https://github.com/mphi-rc/pi-zero-security-key), distributed under Apache License 2.0 (see `LICENSE.txt`).
+A research-grade USB FIDO2 authenticator for Raspberry Pi Zero W, derived from [mphi-rc/pi-zero-security-key](https://github.com/mphi-rc/pi-zero-security-key) (Apache-2.0; see `LICENSE.txt`).
 
-This repository contains **source, build configuration, tests, and essential documentation only**. No credential state, private keys, compiled authenticators, local secrets or agent workspaces are committed.
+**V7.1 is an unverified persistence candidate, not a production release.** `main` holds the reconstructed V6 baseline. Current work is isolated on `v7.1-persistence`. The original V6 Java archive and Raspberry Pi service are intentionally left untouched.
 
-## Status
+## What V7.1 changes
 
-The `main` branch contains a **source reconstruction of the V6 laboratory baseline**, following the previously demonstrated successful CTAP2 `GetInfo`, `MakeCredential`, `GetAssertion` and WebAuthn.io registration/authentication on the owner's Raspberry Pi Zero W.
+- Writes the initial authenticator identity and state **before** attaching USB gadget.
+- Makes credential/PIN/counter updates synchronous: a CTAP operation cannot return success if state persistence fails.
+- Uses atomic same-directory replacement, file/directory fsync, file permissions `0600`, and a state directory restricted to `0700`.
+- Rejects state symlinks, corrupt/unreadable state and insecure permissions instead of silently creating a new identity.
+- Stores mutable state in a dedicated directory (default `/var/lib/pikeyua/config.json`, override via `PIKEYUA_STATE_FILE` or Java property `-Dpikeyua.stateFile=...`).
+- Adds isolated Java tests for file persistence and insecure storage configurations.
 
-**Important:** Reconstructed source is not yet proven byte-for-byte equivalent to the installed V6 JAR. It has not passed a clean build/test cycle. The working Pi is intentionally not modified.
+**Unknown:** The original silent `config.json` failure may involve Gson serialization, not just swallowed background exceptions. The new path fails visibly, but is not considered fixed until the actual Pi has successfully written and reloaded credentials. No device installation has been performed.
 
-The `v7.1-persistence` branch introduces persistence work. Discoverable credentials and reliable PIN-based user verification are not yet complete.
+## Build / development
 
-## Build
-
-Use JDK 17 or 21, and Gradle 8.8 for the first clean build:
+Recommended: JDK 17 and Gradle **8.8** on the Mac. Run:
 
 ```sh
 gradle test shadowJar
 ```
 
-The historic wrapper script is included for provenance, but the original binary `gradle-wrapper.jar` is intentionally excluded until a regenerated, verified wrapper is committed. Once Gradle is installed, generate a wrapper if needed with `gradle wrapper --gradle-version 8.8`.
+The historic wrapper shell script is retained, but this source-only repository does not yet contain the historical binary `gradle-wrapper.jar`; `./gradlew` will require a newly generated, verified wrapper first. Do not assume builds are validated merely because source is committed.
 
-## Security
+## Deployment prerequisites (after build/tests)
 
-This is an experimental **software** authenticator, without a secure element. Automatic user-presence approval does not provide meaningful physical touch verification. Never depend on it as the sole security factor for important accounts. Data on the SD card is not hardware protected.
+The working V6 installation must not be overwritten until V7.1 has passed independent persistence tests. For an isolated test Pi, provision a private persistent directory:
 
-Do not commit `config.json`, credentials, PIN secrets, private keys, system backups or release JARs.
+```sh
+sudo install -d -o root -g root -m 0700 /var/lib/pikeyua
+```
+
+Then start the test JAR with an explicit state path (the default already points here). Never copy `config.json` or private keys into Git. Keep logs free of credentials and PIN material. Test enrollment, assertion, restart, AAGUID/credential stability, and failed writes before upgrading any existing device.
+
+## Security limits
+
+This is not a hardware-secured key. A normal Raspberry Pi SD card does not provide non-extractable secrets. Automatic user-presence approval is not a meaningful physical confirmation. PIN/UV and discoverable credentials are not yet fully implemented; do not claim support. Do not use this as a sole authentication factor for sensitive accounts.
+
+## License
+
+Derived source remains under Apache License 2.0. See `LICENSE.txt`.

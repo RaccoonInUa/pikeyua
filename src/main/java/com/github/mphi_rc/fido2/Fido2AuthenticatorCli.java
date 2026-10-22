@@ -12,7 +12,7 @@ public class Fido2AuthenticatorCli {
 	public static void main(String[] args) throws Exception {
 
 		ConfigurationFile config = ConfigurationFile.defaultPath();
-		config.persistToDiskAsync();
+		config.persistToDisk();
 
 		UsbHidGadget fido2Gadget = ImmutableUsbHidGadget.builder()
 				.name(config.usbGadgetName())
