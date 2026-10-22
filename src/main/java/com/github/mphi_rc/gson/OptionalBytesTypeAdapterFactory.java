@@ -36,7 +36,7 @@ public final class OptionalBytesTypeAdapterFactory implements TypeAdapterFactory
             throw new IllegalArgumentException("Raw Optional is not a supported state type");
         }
         Type[] args = ((ParameterizedType) requested).getActualTypeArguments();
-        if (args.length != 1 || args[0] != byte[].class) {
+        if (args.length != 1 || TypeToken.get(args[0]).getRawType() != byte[].class) {
             throw new IllegalArgumentException(
                     "Unsupported state Optional type: " + requested);
         }
