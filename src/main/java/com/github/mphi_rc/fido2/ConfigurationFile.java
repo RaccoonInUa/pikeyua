@@ -26,6 +26,7 @@ import com.github.mphi_rc.fido2.authenticator.user.UserVerifier;
 import com.github.mphi_rc.gson.AttestationKeyPairTypeAdapter;
 import com.github.mphi_rc.gson.Base64TypeAdapter;
 import com.github.mphi_rc.gson.MillisTypeAdapter;
+import com.github.mphi_rc.gson.OptionalBytesTypeAdapterFactory;
 import com.github.mphi_rc.usb.gadget.GsonAdaptersUsbDeviceController;
 import com.github.mphi_rc.usb.gadget.UsbDeviceController;
 import com.google.gson.Gson;
@@ -65,6 +66,7 @@ public final class ConfigurationFile implements Configuration {
                 .registerTypeAdapter(AttestationKeyPair.class, new AttestationKeyPairTypeAdapter())
                 .registerTypeAdapter(byte[].class, new Base64TypeAdapter())
                 .registerTypeAdapter(Instant.class, new MillisTypeAdapter())
+                .registerTypeAdapterFactory(new OptionalBytesTypeAdapterFactory())
                 .create();
         this.configFile = stateFile.toAbsolutePath().normalize();
         this.config = readFromDisk();
