@@ -44,6 +44,7 @@ public final class ConfigurationFile implements Configuration {
 
     private final Gson gson;
     private final Path configFile;
+    private final Path identityMarker;
     private volatile Configuration config;
 
     public static ConfigurationFile defaultPath() {
@@ -71,6 +72,7 @@ public final class ConfigurationFile implements Configuration {
                 .registerTypeAdapterFactory(new OptionalBytesTypeAdapterFactory())
                 .create();
         this.configFile = stateFile.toAbsolutePath().normalize();
+        this.identityMarker = configFile.resolveSibling(configFile.getFileName() + ".identity");
         this.config = readFromDisk();
     }
 
@@ -92,6 +94,10 @@ public final class ConfigurationFile implements Configuration {
         }
         try {
             AtomicStateFile.write(configFile, serialized);
+            // An independent marker distinguishes genuine first initialization
+            // from accidental deletion of an already initialized state file.
+            AtomicStateFile.write(identityMarker,
+                    proposed.id().toString().getBytes(StandardCharsets.US_ASCII));
         } catch (IOException e) {
             log.error("Authenticator state write failed", e);
             throw new IllegalStateException("Unable to persist authenticator state", e);
@@ -148,6 +154,10 @@ public final class ConfigurationFile implements Configuration {
 
     private Configuration readFromDisk() {
         if (!Files.exists(configFile, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.exists(identityMarker, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalStateException(
+                        "Previously initialized authenticator state is missing");
+            }
             if (Files.isSymbolicLink(configFile)) {
                 throw new IllegalStateException("Refusing symbolic link as authenticator state");
             }
@@ -166,6 +176,14 @@ public final class ConfigurationFile implements Configuration {
             Configuration restored = gson.fromJson(json, Configuration.class);
             if (restored == null) {
                 throw new IllegalStateException("Empty authenticator state");
+            }
+            if (Files.exists(identityMarker, LinkOption.NOFOLLOW_LINKS)) {
+                String pinnedId = new String(AtomicStateFile.read(identityMarker),
+                        StandardCharsets.US_ASCII);
+                if (!restored.id().toString().equals(pinnedId)) {
+                    throw new IllegalStateException(
+                            "Authenticator identity does not match persistent marker");
+                }
             }
             return restored;
         } catch (IOException | RuntimeException e) {

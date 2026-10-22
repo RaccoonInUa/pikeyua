@@ -76,6 +76,8 @@ public final class StateLifecycleProbe {
                 Path malformed = directory.resolve("malformed.json");
                 Path incomplete = directory.resolve("incomplete.json");
                 Path symlink = directory.resolve("linked.json");
+                Path missingBackup = directory.resolve("missing-state-backup.json");
+                Path marker = directory.resolve("config.json.identity");
                 try {
                     AtomicStateFile.write(malformed, "{broken".getBytes(StandardCharsets.UTF_8));
                     assertLoadRejected(malformed, "Malformed JSON");
@@ -83,10 +85,24 @@ public final class StateLifecycleProbe {
                     assertLoadRejected(incomplete, "Missing identity/credentials");
                     Files.createSymbolicLink(symlink, state);
                     assertLoadRejected(symlink, "State symlink");
+                    byte[] pinnedIdentity = AtomicStateFile.read(marker);
+                    try {
+                        AtomicStateFile.write(marker, "wrong-id".getBytes(StandardCharsets.US_ASCII));
+                        assertLoadRejected(state, "Mismatched persisted identity");
+                    } finally {
+                        AtomicStateFile.write(marker, pinnedIdentity);
+                    }
+                    Files.move(state, missingBackup);
+                    try {
+                        assertLoadRejected(state, "Previously initialized missing state");
+                    } finally {
+                        Files.move(missingBackup, state);
+                    }
                 } finally {
                     Files.deleteIfExists(malformed);
                     Files.deleteIfExists(incomplete);
                     Files.deleteIfExists(symlink);
+                    Files.deleteIfExists(missingBackup);
                 }
                 verify(new ConfigurationFile(state), baseline, 1, true);
                 break;

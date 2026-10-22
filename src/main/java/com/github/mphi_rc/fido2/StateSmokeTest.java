@@ -76,6 +76,7 @@ public final class StateSmokeTest {
             System.out.println("PASS: ARMv6 authenticator state, credential, counter, PIN and AAGUID round-trip.");
         } finally {
             Files.deleteIfExists(state);
+            Files.deleteIfExists(directory.resolve("config.json.identity"));
             Files.deleteIfExists(directory);
         }
     }
