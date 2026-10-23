@@ -32,6 +32,8 @@ jobs:
         run: gradle --no-daemon test shadowJar
       - name: Multi-process persistence and failure tests
         run: sh scripts/verify-persistence.sh build/libs/pikeyua.jar
+      - name: V7.1 to V7.2 independent-JVM migration regression
+        run: sh scripts/verify-v72-migration.sh build/libs/pikeyua.jar
       - name: Upload test-only ARM-compatible Java JAR
         if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/v7.1-persistence'
         uses: actions/upload-artifact@v4
