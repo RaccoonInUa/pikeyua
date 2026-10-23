@@ -17,7 +17,18 @@ import com.google.common.collect.ImmutableList;
 @Value.Immutable
 public interface Configuration {
 
+
 	List<Credential> credentials();
+
+	/**
+	 * Old V7.1 JSON omitted this property. Reads default to schema v1; the
+	 * first successful V7.2 mutation promotes state to schema v2.
+	 */
+	@Value.Default
+	default int schemaVersion() {
+		return 1;
+	}
+
 
 	@Value.Default
 	default List<Algorithm> enabledAlgorithms() {

@@ -2,7 +2,7 @@ name: Java CI
 
 on:
   push:
-    branches: [main, v7.1-persistence]
+    branches: [main, v7.1-persistence, feature/v7.2-discoverable-credentials]
   pull_request:
 
 permissions:
