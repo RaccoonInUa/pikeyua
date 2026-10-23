@@ -147,6 +147,7 @@ public final class ConfigurationFile implements Configuration {
         return buffer.array();
     }
 
+    @Override public int schemaVersion() { return config.schemaVersion(); }
     @Override public UsbDeviceController usbDeviceController() { return config.usbDeviceController(); }
     @Override public List<Credential> credentials() { return config.credentials(); }
     @Override public List<Algorithm> enabledAlgorithms() { return config.enabledAlgorithms(); }
