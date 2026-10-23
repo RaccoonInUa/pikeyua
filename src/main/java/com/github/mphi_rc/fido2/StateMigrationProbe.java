@@ -30,16 +30,16 @@ import com.google.gson.JsonParser;
  * Uses only synthetic P-256 keys under an isolated private directory.
  */
 public final class StateMigrationProbe {
-    private static final String LEGACY_RP = "legacy.rp.invalid";
+    private static final String LEGACY_RP = "pikeyua-lifecycle.invalid";
     private static final String NEW_RP = "new.rp.invalid";
     private static final BouncyCastleProvider PROVIDER = new BouncyCastleProvider();
-    private static final byte[] LEGACY_USER = new byte[] {1, 2, 3};
+    private static final byte[] LEGACY_USER = new byte[] {0x70, 0x69, 0x6b, 0x65, 0x79};
 
     private StateMigrationProbe() { }
 
     public static void main(String[] args) throws Exception {
         if (args.length != 2) throw new IllegalArgumentException(
-                "Usage: StateMigrationProbe <legacy-create|legacy-read|upgrade|verify> <test-dir>");
+                "Usage: StateMigrationProbe <legacy-create|legacy-import|legacy-read|upgrade|verify> <test-dir>");
         Path dir = Paths.get(args[1]).toAbsolutePath().normalize();
         check(Files.getPosixFilePermissions(dir).equals(
                 PosixFilePermissions.fromString("rwx------")), "Directory must be 0700");
@@ -70,6 +70,29 @@ public final class StateMigrationProbe {
                 AtomicStateFile.write(oldJson, oldBytes);
                 AtomicStateFile.write(expected, fingerprint(first.credentials().get(0),
                         first.id().toString(), first.getAaguid()).getBytes(StandardCharsets.US_ASCII));
+                break;
+            }
+            case "legacy-import": {
+                check(Files.exists(path), "Authentic V7.1 test state must already exist");
+                byte[] legacyBytes = AtomicStateFile.read(path);
+                JsonObject doc = new JsonParser().parse(
+                        new String(legacyBytes, StandardCharsets.UTF_8)).getAsJsonObject();
+                check(!doc.has("schemaVersion"), "Expected genuine unversioned V7.1 state");
+                JsonArray entries = doc.getAsJsonArray("credentials");
+                check(entries.size() == 1, "Expected one real V7.1 test credential");
+                JsonObject entry = entries.get(0).getAsJsonObject();
+                check(!entry.has("discoverable") && !entry.has("userName")
+                        && !entry.has("userDisplayName"),
+                        "V7.1 state unexpectedly contains V7.2 fields");
+                ConfigurationFile initial = new ConfigurationFile(path);
+                check(initial.schemaVersion() == 1, "Real V7.1 state not interpreted as schema v1");
+                Credential old = initial.credentials().get(0);
+                check(LEGACY_RP.equals(old.relayingPartyId()), "Unexpected legacy test RP");
+                check(Arrays.equals(LEGACY_USER, old.userId()), "Unexpected legacy test handle");
+                verifySigning(old);
+                AtomicStateFile.write(expected, fingerprint(old, initial.id().toString(),
+                        initial.getAaguid()).getBytes(StandardCharsets.US_ASCII));
+                AtomicStateFile.write(oldJson, legacyBytes);
                 break;
             }
             case "legacy-read": {

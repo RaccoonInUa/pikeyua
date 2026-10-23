@@ -34,6 +34,18 @@ jobs:
         run: sh scripts/verify-persistence.sh build/libs/pikeyua.jar
       - name: V7.1 to V7.2 independent-JVM migration regression
         run: sh scripts/verify-v72-migration.sh build/libs/pikeyua.jar
+      - name: Checkout immutable V7.1 baseline for cross-version compatibility
+        if: matrix.java == '17'
+        uses: actions/checkout@v4
+        with:
+          ref: 2b2183924a2dfca16327a8b7dc0940e37a563381
+          path: _v71_reference
+      - name: Build original V7.1 candidate for migration test
+        if: matrix.java == '17'
+        run: gradle -p _v71_reference --no-daemon shadowJar
+      - name: Verify real V7.1 JSON against V7.2 migration
+        if: matrix.java == '17'
+        run: sh scripts/verify-v72-cross-version.sh _v71_reference/build/libs/pikeyua.jar build/libs/pikeyua.jar
       - name: Upload test-only ARM-compatible Java JAR
         if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/v7.1-persistence'
         uses: actions/upload-artifact@v4
