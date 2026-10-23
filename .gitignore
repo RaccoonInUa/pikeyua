@@ -76,3 +76,6 @@ COPILOT.md
 *.agents.md
 agent-workspace/
 agent-output/
+
+# Persisted authenticator identity markers (sensitive local state metadata)
+*.json.identity

@@ -1,0 +1,8 @@
+[Unit]
+Description=pikeyua guarded trial automatic rollback to V6
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pikeyua-cutover rollback-auto
+TimeoutStartSec=180s
