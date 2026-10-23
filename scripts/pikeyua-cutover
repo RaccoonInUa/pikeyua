@@ -187,6 +187,8 @@ report_status() {
 
 # On script errors, perform immediate best-effort rollback. On power loss or
 # SIGKILL, the persistent timer will run after reboot.
+# Mock integration tests source this file to exercise functions without
+# invoking root/systemd/USB operations.
 SWITCH_IN_PROGRESS=0
 on_exit() {
     local code=$?
@@ -196,6 +198,9 @@ on_exit() {
         rollback_internal || say 'URGENT: rollback failed; inspect Pi over Wi-Fi SSH' >&2
     fi
 }
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
