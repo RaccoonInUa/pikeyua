@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Controlled V6 <-> V7.1 USB gadget transition for Raspberry Pi Zero W.
+# Never changes Wi-Fi, SSH, networking or boot config.
+set -Eeuo pipefail
+umask 077
+
+CONTROL=/var/lib/pikeyua-cutover
+GADGET=/sys/kernel/config/usb_gadget/fido2
+UDC_NAME=20980000.usb
+UDC_FILE="$GADGET/UDC"
+UDC_STATE="/sys/class/udc/$UDC_NAME/state"
+V6_UNIT=fido2.service
+V7_UNIT=pikeyua-v7.service
+TIMER=pikeyua-trial-rollback.timer
+V7_JAR=/opt/pikeyua/v7.1/pikeyua.jar
+STATE_FILE=/var/lib/pikeyua/config.json
+V6_BACKUP="$CONTROL/backup/v6.jar"
+STATUS_FILE="$CONTROL/status"
+
+say() { printf '[pikeyua] %s\n' "$*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+needs_root() { [[ "$(id -u)" -eq 0 ]] || die 'Run with sudo/root'; }
+status_value() { [[ -f "$STATUS_FILE" ]] && cat "$STATUS_FILE" || printf 'not-installed\n'; }
+store_status() { printf '%s\n' "$1" > "$STATUS_FILE"; chmod 600 "$STATUS_FILE"; }
+service_active() { systemctl is-active --quiet "$1"; }
+service_enabled() { systemctl is-enabled --quiet "$1"; }
+
+lock_control() {
+    [[ -d "$CONTROL" ]] || die 'Not staged; run the installer first'
+    exec 9>"$CONTROL/.lock"
+    flock -w 120 9 || die 'Another cutover/rollback is running'
+}
+
+check_v6_backup() {
+    [[ -s "$V6_BACKUP" && -f "$CONTROL/v6.sha256" && -s "$CONTROL/v6-exec-jar" ]] ||
+        die 'V6 rollback snapshot is missing'
+    ( cd "$CONTROL/backup" && sha256sum --status -c "$CONTROL/v6.sha256" ) ||
+        die 'V6 backup checksum mismatch; manual intervention needed'
+}
+
+check_stage() {
+    check_v6_backup
+    [[ -s "$V7_JAR" && -f "$CONTROL/v7.sha256" ]] ||
+        die 'V7.1 candidate JAR or hash is missing'
+    [[ -e "$UDC_STATE" ]] || die 'UDC 20980000.usb missing; check dtoverlay=dwc2'
+    ( cd /opt/pikeyua/v7.1 && sha256sum --status -c "$CONTROL/v7.sha256" ) ||
+        die 'V7.1 candidate checksum mismatch'
+    [[ -f /etc/systemd/system/pikeyua-v7.service && -f /etc/systemd/system/pikeyua-trial-rollback.timer ]] ||
+        die 'Required systemd units missing'
+}
+
+# Never destroy/reconfigure the fido2 ConfigFS tree. V6 and V7.1 reuse the
+# same HID descriptor; process stop + unbind are enough.
+detach_gadget() {
+    [[ -e "$UDC_FILE" ]] || die 'Expected fido2 gadget is missing'
+    local current
+    current="$(tr -d '\n\r' < "$UDC_FILE")"
+    if [[ -n "$current" ]]; then
+        [[ "$current" == "$UDC_NAME" ]] || die "Unexpected gadget UDC binding: $current"
+        say 'Unbinding fido2 USB gadget from the single UDC'
+        printf '\n' > "$UDC_FILE"
+    fi
+    [[ -z "$(tr -d '\n\r' < "$UDC_FILE")" ]] || die 'Gadget failed to unbind'
+}
+
+check_gadget_identity() {
+    [[ -f "$GADGET/idVendor" && -f "$GADGET/idProduct" ]] || die 'Expected gadget not present'
+    local vendor product length
+    vendor="$(< "$GADGET/idVendor")"
+    product="$(< "$GADGET/idProduct")"
+    length="$(< "$GADGET/functions/hid.usb0/report_length")"
+    [[ $((vendor)) -eq 0x1050 && $((product)) -eq 0x0402 && "$length" -eq 64 ]] ||
+        die "Unexpected gadget VID/PID/report size ($vendor/$product/$length)"
+}
+
+check_running() {
+    local unit=$1 jar=$2 deadline=${3:-75} pid cmd bound state started
+    started=$SECONDS
+    while (( SECONDS - started < deadline )); do
+        if service_active "$unit"; then
+            pid="$(systemctl show --value --property=MainPID "$unit")"
+            if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/cmdline" ]]; then
+                cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+                bound="$(tr -d '\r\n' < "$UDC_FILE")"
+                state="$(cat "$UDC_STATE")"
+                if [[ "$cmd" == *"$jar"* && "$bound" == "$UDC_NAME" && "$state" == configured ]]; then
+                    if ls -l "/proc/$pid/fd" 2>/dev/null | grep -q '/dev/hidg0'; then
+                        sleep 3
+                        if service_active "$unit" && [[ "$(systemctl show --value --property=MainPID "$unit")" == "$pid" ]]; then
+                            say "Hardware-level ready: $unit (PID=$pid; UDC=configured; HID open)"
+                            return 0
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        sleep 2
+    done
+    say "Hardware-level readiness timeout: $unit; last status follows" >&2
+    systemctl status --no-pager -l "$unit" >&2 || true
+    journalctl -u "$unit" -n 30 --no-pager >&2 || true
+    return 1
+}
+
+rollback_internal() {
+    say 'Restoring original V6 FIDO service; preserving V7.1 test state on disk'
+    systemctl stop "$V7_UNIT" || true
+    if [[ -e "$UDC_FILE" ]]; then
+        detach_gadget || die 'Could not safely release USB gadget for rollback'
+    fi
+    systemctl disable "$V7_UNIT" >/dev/null || true
+    local original_v6
+    original_v6="$(cat "$CONTROL/v6-exec-jar")"
+    if [[ ! -s "$original_v6" ]] || ! cmp -s "$V6_BACKUP" "$original_v6"; then
+        [[ ! -L "$original_v6" ]] || die 'V6 JAR path became a symlink; restore manually'
+        say 'Original V6 JAR missing or modified; restoring verified snapshot'
+        install -m 0644 -o root -g root "$V6_BACKUP" "$original_v6"
+    fi
+    systemctl enable "$V6_UNIT" >/dev/null || die 'Could not re-enable V6 at boot'
+    systemctl reset-failed "$V6_UNIT" || true
+    systemctl start "$V6_UNIT" || die 'Unable to start V6. V6 backups remain available.'
+    check_running "$V6_UNIT" "$(cat "$CONTROL/v6-exec-jar")" 75 ||
+        die 'V6 restart failed. Do not unplug Pi; inspect systemd and UDC.'
+    store_status v6-restored
+    systemctl disable --now "$TIMER" >/dev/null 2>&1 || true
+    say 'V6 restored. V7.1 state retained for later investigation.'
+}
+
+preflight_switch() {
+    check_stage
+    [[ "$(status_value)" == staged || "$(status_value)" == v6-restored ]] ||
+        die "Cannot start trial from state: $(status_value)"
+    ip -4 -o addr show dev wlan0 2>/dev/null | grep -q 'inet ' ||
+        die 'wlan0 has no IPv4 address; Wi-Fi SSH rollback access is not assured'
+    service_active "$V6_UNIT" || die 'V6 is not active; refusing to switch'
+    service_enabled "$V6_UNIT" || die 'V6 must be enabled for safe rollback'
+    ! service_active "$V7_UNIT" || die 'V7 is already active'
+    check_gadget_identity
+    [[ "$(tr -d '\n\r' < "$UDC_FILE")" == "$UDC_NAME" ]] || die 'V6 gadget is not attached'
+    [[ "$(cat "$UDC_STATE")" == configured ]] || die 'Mac is not enumerating USB (state not configured)'
+    local source_jar; source_jar="$(cat "$CONTROL/v6-exec-jar")"
+    [[ -s "$source_jar" ]] || die 'Configured V6 executable disappeared'
+    say 'Preflight passed: V6 active and enumerated, V7 staged, Wi-Fi online, rollback snapshot verified.'
+}
+
+switch_to_v7() {
+    preflight_switch
+    say 'Arming a 25-minute trial timer BEFORE touching the V6 service'
+    store_status trial
+    # Enabled rollback timer survives reboots during trial.
+    systemctl enable --now "$TIMER" >/dev/null || die 'Cannot arm rollback timer; aborting'
+    systemctl disable "$V6_UNIT" >/dev/null || die 'Cannot disable V6 for trial'
+    systemctl enable "$V7_UNIT" >/dev/null || die 'Cannot enable V7 for trial'
+    systemctl stop "$V6_UNIT" || die 'Could not stop V6'
+    ! service_active "$V6_UNIT" || die 'V6 still active; aborting'
+    detach_gadget
+    systemctl reset-failed "$V7_UNIT" || true
+    systemctl start "$V7_UNIT" || die 'V7.1 could not start'
+    check_running "$V7_UNIT" "$V7_JAR" 90 || die 'V7.1 did not become USB-ready'
+    say 'V7.1 is ready. DO NOT confirm until registration + authentication in test RP succeed.'
+    say 'Run: sudo pikeyua-cutover confirm (before timer), or rollback to return to V6.'
+}
+
+confirm_v7() {
+    check_stage
+    [[ "$(status_value)" == trial ]] || die 'There is no pending V7 trial'
+    ! service_active "$V6_UNIT" || die 'V6 is unexpectedly active'
+    check_running "$V7_UNIT" "$V7_JAR" 10 || die 'V7 is not healthy'
+    store_status v7-confirmed
+    systemctl disable --now "$TIMER" >/dev/null 2>&1 || true
+    say 'V7.1 confirmed, rollback timer disarmed; V6 backup and manual rollback preserved.'
+    say 'Test reboot persistence on a TEST account. Manual rollback remains available.'
+}
+
+report_status() {
+    say "Cutover status: $(status_value)"
+    for unit in "$V6_UNIT" "$V7_UNIT" "$TIMER"; do
+        say "$unit: active=$(systemctl is-active "$unit" 2>/dev/null || true) enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+    done
+    if [[ -e "$UDC_FILE" ]]; then
+        say "UDC=$(tr -d '\r\n' < "$UDC_FILE") USB-state=$(cat "$UDC_STATE" 2>/dev/null || echo missing)"
+    fi
+    if [[ -f "$STATE_FILE" ]]; then
+        say 'V7.1 state file exists (contents deliberately not displayed)'
+    fi
+}
+
+# On script errors, perform immediate best-effort rollback. On power loss or
+# SIGKILL, the persistent timer will run after reboot.
+SWITCH_IN_PROGRESS=0
+on_exit() {
+    local code=$?
+    trap - EXIT INT TERM
+    if [[ "$SWITCH_IN_PROGRESS" == 1 && "$code" -ne 0 && "$(status_value)" == trial ]]; then
+        say 'Switch failed; performing immediate V6 rollback' >&2
+        rollback_internal || say 'URGENT: rollback failed; inspect Pi over Wi-Fi SSH' >&2
+    fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+needs_root
+command -v flock >/dev/null || die 'flock required (util-linux)'
+command -v systemctl >/dev/null || die 'systemctl required'
+case "${1:-}" in
+    status) report_status ;;
+    preflight) lock_control; preflight_switch ;;
+    switch)
+        lock_control
+        SWITCH_IN_PROGRESS=1
+        switch_to_v7
+        SWITCH_IN_PROGRESS=0
+        ;;
+    confirm) lock_control; confirm_v7 ;;
+    rollback|rollback-auto)
+        lock_control
+        if [[ "${1}" == rollback-auto && "$(status_value)" != trial ]]; then
+            say 'No pending trial; timer rollback not necessary'
+            exit 0
+        fi
+        current_status="$(status_value)"
+        [[ "$current_status" == trial || "$current_status" == v7-confirmed ]] ||
+            die "Rollback not applicable in state: $current_status"
+        check_v6_backup
+        rollback_internal
+        ;;
+    *) die 'Usage: pikeyua-cutover {status|preflight|switch|confirm|rollback}' ;;
+esac

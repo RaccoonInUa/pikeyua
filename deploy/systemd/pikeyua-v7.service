@@ -1,0 +1,24 @@
+[Unit]
+Description=pikeyua V7.1 USB FIDO2 authenticator (trial candidate)
+After=local-fs.target
+RequiresMountsFor=/var/lib/pikeyua
+Conflicts=fido2.service
+ConditionPathExists=/opt/pikeyua/v7.1/pikeyua.jar
+StartLimitIntervalSec=90
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/pikeyua/v7.1
+Environment=PIKEYUA_STATE_FILE=/var/lib/pikeyua/config.json
+ExecStart=/usr/bin/java -jar /opt/pikeyua/v7.1/pikeyua.jar
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -68,3 +68,9 @@ This is not a hardware-secured key. A normal Raspberry Pi SD card does not provi
 ## License
 
 Derived source remains under Apache License 2.0. See `LICENSE.txt`.
+
+## Controlled V6 → V7.1 trial and rollback
+
+See [V7.1 cutover guide](docs/V7_1_CUTOVER.md). The deployment package has a staging-only installer, a preflight check, a guarded USB switch, a **25-minute rollback timer**, explicit confirmation, and manual rollback. It preserves the original V6 unit/JAR and does not change network or boot configuration.
+
+**Important:** Rollback restores V6 *software*, not in-memory test credentials previously lost because V6 did not persist state. Do not use this as a sole authenticator for real accounts. The V7.1 USB reboot/real WebAuthn qualification is pending.

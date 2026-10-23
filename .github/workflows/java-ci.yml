@@ -24,6 +24,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.8'
+      - name: Validate reversible cutover scripts
+        run: bash scripts/check-cutover-syntax.sh
       - name: Test and assemble
         run: gradle --no-daemon test shadowJar
       - name: Multi-process persistence and failure tests
