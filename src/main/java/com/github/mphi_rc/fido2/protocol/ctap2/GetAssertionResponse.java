@@ -16,12 +16,11 @@ public abstract class GetAssertionResponse {
     public abstract byte[] signature();
     public abstract byte[] userId();
     @Value.Default public boolean includeUser() { return false; }
-    /** Zero means absent. Only the first discovery response may contain a count > 1. */
+    @Value.Default public String userName() { return ""; }
+    @Value.Default public String userDisplayName() { return ""; }
     @Value.Default public int numberOfCredentials() { return 0; }
-
     public List<DataItem> asCborMap() {
-        Map root = new Map();
-        Map descriptor = new Map();
+        Map root = new Map(), descriptor = new Map();
         descriptor.put(new UnicodeString("id"), new ByteString(credentialId()));
         descriptor.put(new UnicodeString("type"), new UnicodeString("public-key"));
         root.put(new UnsignedInteger(1), descriptor);
@@ -30,13 +29,14 @@ public abstract class GetAssertionResponse {
         if (includeUser()) {
             Map user = new Map();
             user.put(new UnicodeString("id"), new ByteString(userId()));
-            // User-identifying name/displayName are deliberately never released in Stage C.
-            // We do not rely on the old, not-yet-qualified PIN implementation for that.
+            // Defense in depth: no identifying names unless the SIGNED authenticatorData has UV=1.
+            if (authData().length >= 37 && (authData()[32] & 0x04) != 0) {
+                if (!userName().isEmpty()) user.put(new UnicodeString("name"), new UnicodeString(userName()));
+                if (!userDisplayName().isEmpty()) user.put(new UnicodeString("displayName"), new UnicodeString(userDisplayName()));
+            }
             root.put(new UnsignedInteger(4), user);
         }
-        if (numberOfCredentials() > 1) {
-            root.put(new UnsignedInteger(5), new UnsignedInteger(numberOfCredentials()));
-        }
+        if (numberOfCredentials() > 1) root.put(new UnsignedInteger(5), new UnsignedInteger(numberOfCredentials()));
         return Collections.<DataItem>singletonList(root);
     }
 }

@@ -2,20 +2,21 @@
 
 Experimental USB FIDO2 software authenticator for Raspberry Pi Zero W, derived from [mphi-rc/pi-zero-security-key](https://github.com/mphi-rc/pi-zero-security-key). Apache-2.0; see `LICENSE.txt`.
 
-## Current development status
+## Current development
 
-The physical Raspberry is running the tested **V7.1 persistence baseline**. This branch, `feature/v7.2-discoverable-credentials`, develops **V7.2** separately; it has not been deployed to that device. PR #4 is a draft against `v7.1-persistence`.
+The laboratory Pi has the V7.2 candidate, an ARMv6-isolated RK probe PASS and USB GetInfo reporting RK. Actual RK-required/browser no-allowList authentication has not yet been reported. This branch, `feature/v7.3-pin-uv`, adds **Client PIN / PIN-based UV**, not another deployment controller. The owner explicitly cancelled the separate cutover mechanism; no additional timer/service/snapshot framework is required.
 
-V7.2 contains backward-compatible credential schema migration, typed CTAP2 parsing and an **opt-in** implementation of discoverable credentials: RK creation, RP-scoped lookup and multi-account GetNextAssertion. The default executable continues reporting `rk=false`. An isolated candidate may enable RK with `-Dpikeyua.experimentalRk=true` for qualification. Do not change the working service or use live state without a separate migration/rollback plan.
+V7.3 implements protocol1 PIN setup/change/token exchange, persistent retries, temporary and persistent lockout, token invalidation, signed UV and verification-gated account names. It remains an unqualified hardware/browser candidate until those tests are actually performed. Existing RK is enabled with `-Dpikeyua.experimentalRk=true`; no additional PIN feature flag is needed. GetInfo's clientPin reflects whether a PIN has been set, not a claim of built-in biometric UV.
 
+- [V7.3 implementation, limitations and isolated probe](docs/V7_3_PIN_UV.md)
+- [V7.2 RK implementation](docs/V7_2_PROTOCOL_STAGE_C.md)
 - [V7.2 design review](docs/V7_2_RK_DESIGN_REVIEW.md)
-- [Phase A: storage migration](docs/V7_2_STORAGE_MIGRATION.md)
-- [Phase B: request parsing](docs/V7_2_PROTOCOL_STAGE_B.md)
-- [Stage C: RK implementation, limits and test procedure](docs/V7_2_PROTOCOL_STAGE_C.md)
-- [V7.1 persistence acceptance](docs/PERSISTENCE_TESTS.md)
-- [Historic V6-to-V7.1 cutover](docs/V7_1_CUTOVER.md) — NOT a V7.2 upgrade procedure
+- [Credential schema migration](docs/V7_2_STORAGE_MIGRATION.md)
+- [V7.2 request parsing](docs/V7_2_PROTOCOL_STAGE_B.md)
+- [V7.1 persistence tests](docs/PERSISTENCE_TESTS.md)
+- [Historic V6/V7.1 cutover](docs/V7_1_CUTOVER.md) — not an upgrader for V7.3
 
-## Build and isolated testing
+## Build and test
 
 Use Gradle 8.8 and JDK 17 or 21:
 
@@ -24,18 +25,15 @@ gradle --no-daemon test shadowJar
 sh scripts/verify-persistence.sh build/libs/pikeyua.jar
 sh scripts/verify-v72-migration.sh build/libs/pikeyua.jar
 java -cp build/libs/pikeyua.jar com.github.mphi_rc.fido2.ResidentCredentialProbe
+java -cp build/libs/pikeyua.jar com.github.mphi_rc.fido2.PinUvProbe
 ```
 
-The historic Gradle wrapper script is retained, but its wrapper JAR is not tracked; `./gradlew` needs a separately generated/verified wrapper. No compiled product binaries are committed.
-
-The RK probe uses synthetic keys in its own private temporary directory and three independent JVMs. It never touches the live FIDO service, real credentials, USB, Wi-Fi or boot settings. Its passing result is NOT a browser/USB/ARMv6 qualification result unless separately executed and reported on that hardware.
-
-CI builds the original V7.1 commit `2b218392` independently for a genuine cross-version state test. Candidate JARs are short-lived Actions artifacts, not releases. `pikeyua-v7.2-rk-lab-jdk17` contains the test JAR, commit and SHA-256 checksum; never install it over a live V7.1 JAR just because CI is green.
+Both probes use private synthetic temporary state and independent JVMs, never live credentials or USB. The historical wrapper lacks a tracked wrapper JAR; use the named Gradle version or regenerate/verify the wrapper separately. CI's `pikeyua-v7.3-pin-uv-lab-jdk17` artifact contains the JAR, commit, checksum and test instructions. Generated binaries and actual device state never belong in Git.
 
 ## Storage and security
 
-State is private software storage (`0700` directory, `0600` JSON and identity marker) with atomic JSON replacement and fsync. Default live path is `/var/lib/pikeyua/config.json`. AAGUID and legacy credential IDs are preserved during forward migration. Downgrading to V7.1 after writing RK state needs a matching protected snapshot; old code may discard RK metadata.
+State is root-private (`0700` directory, `0600` files), using atomic JSON replacement and fsync. PIN mutation promotes to schema v3 to retain the retry budget across restarts; older V7.2 must not be pointed at v3 state. Forward migration preserves credentials, keys and AAGUID. See the V7.3 document for PIN optionality, lockout, downgrade and storage-error boundaries.
 
-This is a laboratory authenticator **without a secure element or physical touch confirmation**. The headless verifier auto-approves UP. PIN-based UV is not yet qualified; RK alone does not meet `userVerification=required`. Privileged access to the SD card can expose keys. Never rely on this project as the sole authenticator for important accounts.
+This is a laboratory authenticator with **no secure element and simulated physical UP**. PIN verification does not encrypt private keys on the SD card or protect against root access. Browser/physical USB and real power-loss qualification remain necessary; no FIDO certification or production-security claim is made. Never use as the sole authenticator for important accounts.
 
-Repository contents are source, necessary build configuration, tests and product documentation only. Do not commit secrets, real state, binary artifacts, agent workspaces or AGENTS.md.
+Keep source, tests and necessary documentation only: no real credentials, private config, build artifacts, agent workspaces or AGENTS.md.

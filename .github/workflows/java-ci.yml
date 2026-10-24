@@ -2,7 +2,7 @@ name: Java CI
 
 on:
   push:
-    branches: [main, v7.1-persistence, feature/v7.2-discoverable-credentials]
+    branches: [main, v7.1-persistence, feature/v7.2-discoverable-credentials, feature/v7.3-pin-uv]
   pull_request:
 
 permissions:
@@ -24,9 +24,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.8'
-      - name: Validate reversible cutover scripts
+      - name: Validate existing cutover scripts
         run: bash scripts/check-cutover-syntax.sh
-      - name: Mocked USB cutover and rollback state-machine tests
+      - name: Existing mocked cutover regressions
         run: bash scripts/test-cutover-mock.sh
       - name: Test and assemble
         run: gradle --no-daemon test shadowJar
@@ -45,21 +45,23 @@ jobs:
         run: sh scripts/verify-persistence.sh build/libs/pikeyua.jar
       - name: V7.1 to V7.2 independent-JVM migration regression
         run: sh scripts/verify-v72-migration.sh build/libs/pikeyua.jar
-      - name: Resident credential CTAP lifecycle across independent JVMs
+      - name: Resident credential lifecycle across independent JVMs
         run: java -cp build/libs/pikeyua.jar com.github.mphi_rc.fido2.ResidentCredentialProbe
-      - name: Checkout immutable V7.1 baseline for cross-version compatibility
+      - name: PIN and UV lifecycle across independent JVMs
+        run: java -cp build/libs/pikeyua.jar com.github.mphi_rc.fido2.PinUvProbe
+      - name: Checkout immutable V7.1 baseline
         if: matrix.java == '17'
         uses: actions/checkout@v4
         with:
           ref: 2b2183924a2dfca16327a8b7dc0940e37a563381
           path: _v71_reference
-      - name: Build original V7.1 candidate for migration test
+      - name: Build original V7.1 for migration test
         if: matrix.java == '17'
         run: gradle -p _v71_reference --no-daemon shadowJar
-      - name: Verify real V7.1 JSON against V7.2 migration
+      - name: Verify genuine V7.1 JSON compatibility
         if: matrix.java == '17'
         run: sh scripts/verify-v72-cross-version.sh _v71_reference/build/libs/pikeyua.jar build/libs/pikeyua.jar
-      - name: Upload test-only ARM-compatible Java JAR
+      - name: Upload V7.1 candidate
         if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/v7.1-persistence'
         uses: actions/upload-artifact@v4
         with:
@@ -67,19 +69,19 @@ jobs:
           path: build/libs/pikeyua.jar
           if-no-files-found: error
           retention-days: 7
-      - name: Package isolated V7.2 test candidate
-        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.2-discoverable-credentials'
+      - name: Package PIN/UV lab candidate
+        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.3-pin-uv'
         run: |
-          mkdir -p build/rk-candidate
-          cp build/libs/pikeyua.jar build/rk-candidate/
-          printf '%s\n' "$GITHUB_SHA" > build/rk-candidate/COMMIT.txt
-          (cd build/rk-candidate && sha256sum pikeyua.jar > SHA256SUMS)
-          printf '%s\n' 'TEST ONLY. Do not replace the live V7.1 service or use live credential state.' 'Run: java -cp pikeyua.jar com.github.mphi_rc.fido2.ResidentCredentialProbe' > build/rk-candidate/TEST_ONLY.txt
-      - name: Upload isolated V7.2 test candidate
-        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.2-discoverable-credentials'
+          mkdir -p build/pin-candidate
+          cp build/libs/pikeyua.jar build/pin-candidate/
+          printf '%s\n' "$GITHUB_SHA" > build/pin-candidate/COMMIT.txt
+          (cd build/pin-candidate && sha256sum pikeyua.jar > SHA256SUMS)
+          printf '%s\n' 'LAB CANDIDATE. No hardware/browser qualification yet.' 'First run without sudo: java -cp pikeyua.jar com.github.mphi_rc.fido2.PinUvProbe' 'Do not run this JAR against your live state before reviewing V7_3_PIN_UV.md.' > build/pin-candidate/TEST_ONLY.txt
+      - name: Upload PIN/UV lab candidate
+        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.3-pin-uv'
         uses: actions/upload-artifact@v4
         with:
-          name: pikeyua-v7.2-rk-lab-jdk17
-          path: build/rk-candidate/
+          name: pikeyua-v7.3-pin-uv-lab-jdk17
+          path: build/pin-candidate/
           if-no-files-found: error
           retention-days: 7
