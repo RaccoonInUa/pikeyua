@@ -29,4 +29,11 @@ public interface Configuration {
         return UsbDeviceController.raspberryPiZero();
     }
     @Value.Default default String usbGadgetName() { return "fido2"; }
+    @Value.Check default void checkPinState() {
+        if (pinRetries() < 0 || pinRetries() > 8
+                || (pinHash().isPresent() && pinHash().get().length != 16)
+                || (!pinHash().isPresent() && (schemaVersion() >= 3 || pinRetries() != 8))) {
+            throw new IllegalStateException("Invalid protected PIN state");
+        }
+    }
 }
