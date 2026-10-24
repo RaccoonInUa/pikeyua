@@ -84,10 +84,16 @@ public final class ConfigurationFile implements Configuration {
         return new AlwaysAllowUserVerifier();
     }
 
-    private void persist(Configuration proposed) {
+    private Configuration persist(Configuration proposed) {
+        // Upgrade only on a successful write. Reads of V7.1 state are
+        // non-destructive and never rewrite identities or private keys.
+        final Configuration updated = ImmutableConfiguration.builder()
+                .from(proposed)
+                .schemaVersion(2)
+                .build();
         final byte[] serialized;
         try {
-            serialized = gson.toJson(proposed).getBytes(StandardCharsets.UTF_8);
+            serialized = gson.toJson(updated).getBytes(StandardCharsets.UTF_8);
         } catch (RuntimeException e) {
             log.error("Authenticator state serialization failed", e);
             throw new IllegalStateException("Unable to serialize authenticator state", e);
@@ -97,16 +103,17 @@ public final class ConfigurationFile implements Configuration {
             // An independent marker distinguishes genuine first initialization
             // from accidental deletion of an already initialized state file.
             AtomicStateFile.write(identityMarker,
-                    proposed.id().toString().getBytes(StandardCharsets.US_ASCII));
+                    updated.id().toString().getBytes(StandardCharsets.US_ASCII));
         } catch (IOException e) {
             log.error("Authenticator state write failed", e);
             throw new IllegalStateException("Unable to persist authenticator state", e);
         }
+        return updated;
     }
 
     /** Persists initial UUID/config before exposing the FIDO2 USB device. */
     public synchronized void persistToDisk() {
-        persist(config);
+        config = persist(config);
     }
 
     public synchronized void updatePinHash(byte[] pinHash) {
@@ -114,8 +121,7 @@ public final class ConfigurationFile implements Configuration {
                 .from(config)
                 .pinHash(Optional.of(pinHash))
                 .build();
-        persist(next);
-        config = next;
+        config = persist(next);
     }
 
     public synchronized void addCredential(Credential credential) {
@@ -123,8 +129,7 @@ public final class ConfigurationFile implements Configuration {
                 .from(config)
                 .addCredentials(credential)
                 .build();
-        persist(next);
-        config = next;
+        config = persist(next);
     }
 
     public synchronized void updateAllStoredCredentials(List<Credential> credentials) {
@@ -132,8 +137,7 @@ public final class ConfigurationFile implements Configuration {
                 .from(config)
                 .credentials(credentials)
                 .build();
-        persist(next);
-        config = next;
+        config = persist(next);
     }
 
     public byte[] getAaguid() {
@@ -143,6 +147,7 @@ public final class ConfigurationFile implements Configuration {
         return buffer.array();
     }
 
+    @Override public int schemaVersion() { return config.schemaVersion(); }
     @Override public UsbDeviceController usbDeviceController() { return config.usbDeviceController(); }
     @Override public List<Credential> credentials() { return config.credentials(); }
     @Override public List<Algorithm> enabledAlgorithms() { return config.enabledAlgorithms(); }
@@ -176,6 +181,11 @@ public final class ConfigurationFile implements Configuration {
             Configuration restored = gson.fromJson(json, Configuration.class);
             if (restored == null) {
                 throw new IllegalStateException("Empty authenticator state");
+            }
+            if (restored.schemaVersion() < 1 || restored.schemaVersion() > 2) {
+                throw new IllegalStateException(
+                        "Unsupported authenticator state schema version: "
+                                + restored.schemaVersion());
             }
             if (Files.exists(identityMarker, LinkOption.NOFOLLOW_LINKS)) {
                 String pinnedId = new String(AtomicStateFile.read(identityMarker),

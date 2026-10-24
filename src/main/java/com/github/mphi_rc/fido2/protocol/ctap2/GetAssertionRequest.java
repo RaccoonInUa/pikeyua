@@ -1,81 +1,46 @@
 package com.github.mphi_rc.fido2.protocol.ctap2;
 
-import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
-
 import org.immutables.value.Value;
-
-import com.google.common.collect.Iterables;
-
-import co.nstant.in.cbor.CborDecoder;
 import co.nstant.in.cbor.CborException;
-import co.nstant.in.cbor.model.Array;
-import co.nstant.in.cbor.model.ByteString;
-import co.nstant.in.cbor.model.DataItem;
 import co.nstant.in.cbor.model.Map;
-import co.nstant.in.cbor.model.UnicodeString;
-import co.nstant.in.cbor.model.UnsignedInteger;
 
+/** Strict GetAssertion parser. Missing allowList never implies any arbitrary key. */
 @Value.Immutable
 public abstract class GetAssertionRequest {
+    public static GetAssertionRequest fromBytes(byte[] bytes) throws CborException {
+        Map root = Ctap2CborInput.root(bytes);
+        String rpId = Ctap2CborInput.requiredString(root, 0x01, 253);
+        byte[] hash = Ctap2CborInput.requiredBytes(root, 0x02, 32, 32);
+        boolean listPresent = Ctap2CborInput.lookup(root, 0x03) != null;
+        List<byte[]> ids = Ctap2CborInput.descriptorIds(root, 0x03);
+        Map options = Ctap2CborInput.options(root, 0x05);
+        boolean uv = Ctap2CborInput.booleanOption(options, "uv", false);
+        boolean up = Ctap2CborInput.booleanOption(options, "up", true);
 
-	private static final byte RELAYING_PARTY_ID_KEY = 0x01;
-	private static final byte CLIENT_DATA_HASH_KEY = 0x02;
-	private static final byte ALLOW_LIST_KEY = 0x03;
-	private static final byte PIN_AUTH_KEY = 0x06;
-	private static final byte PIN_PROTOCOL_VERSION_KEY = 0x07;
+        ImmutableGetAssertionRequest.Builder builder = ImmutableGetAssertionRequest.builder()
+                .clientDataHash(hash).relayingPartyId(rpId)
+                .addAllPublicKeyIds(ids)
+                .allowListPresent(listPresent)
+                .userVerificationRequested(uv)
+                .userPresenceRequested(up);
+        byte[] pinAuth = Ctap2CborInput.optionalPinAuth(root, 0x06);
+        if (pinAuth != null) builder.pinAuth(pinAuth);
+        Integer protocol = Ctap2CborInput.optionalPinProtocol(root, 0x07);
+        if (protocol != null) builder.pinProtocolVersion(protocol);
+        return builder.build();
+    }
 
-	public static GetAssertionRequest fromBytes(byte[] bytes) throws CborException {
-		List<DataItem> values = CborDecoder.decode(bytes);
-
-		Map map = (Map) Iterables.getFirst(values, null);
-		if (Objects.isNull(map)) {
-			throw new CborException("Empty CBOR request");
-		}
-		ByteString clientDataHash = (ByteString) map.get(new UnsignedInteger(CLIENT_DATA_HASH_KEY));
-		if (Objects.isNull(clientDataHash)) {
-			throw new CborException("The client data hash is missing");
-		}
-
-		UnicodeString relayingPartyId = (UnicodeString) map.get(new UnsignedInteger(RELAYING_PARTY_ID_KEY));
-		if (Objects.isNull(relayingPartyId)) {
-			throw new CborException("The relaying party ID is missing");
-		}
-		
-		Array allowList = (Array) map.get(new UnsignedInteger(ALLOW_LIST_KEY));
-		ArrayList<byte[]> publicKeyIds = new ArrayList<>();
-		if (!Objects.isNull(relayingPartyId)) {
-			for (DataItem item : allowList.getDataItems()) {
-				ByteString id = ((ByteString) ((Map) item).get(new UnicodeString("id")));
-				publicKeyIds.add(id.getBytes());
-			}
-		}
-		
-		ImmutableGetAssertionRequest.Builder builder = ImmutableGetAssertionRequest.builder()
-				.clientDataHash(clientDataHash.getBytes())
-				.relayingPartyId(relayingPartyId.getString())
-				.publicKeyIds(publicKeyIds);
-		
-		ByteString pinAuth = (ByteString) map.get(new UnsignedInteger(PIN_AUTH_KEY));
-		if (!Objects.isNull(pinAuth)) {
-			builder.pinAuth(pinAuth.getBytes());
-		}
-
-		UnsignedInteger pinProtocolVersion = (UnsignedInteger) map.get(new UnsignedInteger(PIN_PROTOCOL_VERSION_KEY));
-		if (!Objects.isNull(pinProtocolVersion)) {
-			builder.pinProtocolVersion(pinProtocolVersion.getValue().intValue());
-		}
-		
-		return builder.build();
-	}
-
-	public abstract String relayingPartyId();
-	public abstract byte[] clientDataHash();
-	public abstract Set<byte[]> publicKeyIds();
-	public abstract Optional<byte[]> pinAuth();
-	public abstract Optional<Integer> pinProtocolVersion();
-
+    public abstract String relayingPartyId();
+    public abstract byte[] clientDataHash();
+    public abstract Optional<byte[]> pinAuth();
+    public abstract Optional<Integer> pinProtocolVersion();
+    @Value.Default public List<byte[]> publicKeyIds() {
+        return Collections.emptyList();
+    }
+    @Value.Default public boolean allowListPresent() { return false; }
+    @Value.Default public boolean userVerificationRequested() { return false; }
+    @Value.Default public boolean userPresenceRequested() { return true; }
 }

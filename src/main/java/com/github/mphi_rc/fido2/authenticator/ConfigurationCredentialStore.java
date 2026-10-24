@@ -2,57 +2,67 @@ package com.github.mphi_rc.fido2.authenticator;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 import com.github.mphi_rc.fido2.ConfigurationFile;
 import com.github.mphi_rc.fido2.authenticator.crypto.AttestationKeyPair;
 
-
+/** All modifications are published only after ConfigurationFile's durable write succeeds. */
 public class ConfigurationCredentialStore implements CredentialStore {
+    private final ConfigurationFile config;
 
-	private final ConfigurationFile config;
+    public ConfigurationCredentialStore(ConfigurationFile config) { this.config = config; }
 
-	public ConfigurationCredentialStore(ConfigurationFile config) {
-		this.config = config;
-	}
+    @Override public Collection<Credential> getCredentials(String rpId) {
+        return config.credentials().stream().filter(c -> c.relayingPartyId().equals(rpId))
+                .collect(Collectors.toList());
+    }
 
-	@Override
-	public Collection<Credential> getCredentials(String relayingPartyId) {
-		return config.credentials().stream()
-				.filter(c -> c.relayingPartyId().equals(relayingPartyId))
-				.collect(Collectors.toList());
-	}
+    @Override public Credential saveCredential(String rpId, byte[] userId, AttestationKeyPair keys) {
+        return saveCredential(rpId, userId, keys, false, "", "");
+    }
 
-	@Override
-	public Credential saveCredential(String relayingPartyId, byte[] userId, AttestationKeyPair keyPair) {
-		Credential credential = ImmutableCredential.of(relayingPartyId, Instant.now(), userId, keyPair, 0);
-		config.addCredential(credential);
-		return credential;
-	}
+    @Override public Credential saveCredential(String rpId, byte[] userId, AttestationKeyPair keys,
+            boolean discoverable, String name, String displayName) {
+        synchronized (config) {
+            Credential added = ImmutableCredential.builder()
+                    .relayingPartyId(rpId).creation(Instant.now()).userId(userId)
+                    .keyPair(keys).signatureCount(0).discoverable(discoverable)
+                    .userName(name).userDisplayName(displayName).build();
+            List<Credential> next = new ArrayList<>(config.credentials());
+            if (discoverable) {
+                // Do NOT convert or delete a legacy non-RK credential for the same account.
+                // RK re-registration replaces only existing RK records for this exact tuple.
+                next.removeIf(c -> c.discoverable() && c.relayingPartyId().equals(rpId)
+                        && Arrays.equals(c.userId(), userId));
+                if (next.stream().filter(Credential::discoverable).count()
+                        >= MAX_DISCOVERABLE_CREDENTIALS) throw new CredentialStore.Full();
+            }
+            next.add(added);
+            config.updateAllStoredCredentials(next);
+            return added;
+        }
+    }
 
-	@Override
-	public void incrementCredentialCounter(String relayingPartyId, AttestationKeyPair keyPair) {
-		Optional<Credential> matchingCredential = getCredentials(relayingPartyId).stream()
-				.filter(cred -> cred.keyPair().equals(keyPair))
-				.findFirst();
-
-		if (matchingCredential.isPresent()) {
-			Credential existing = matchingCredential.get();
-			Credential updated = ImmutableCredential.builder()
-					.from(existing)
-					.signatureCount(existing.signatureCount() + 1)
-					.build();
-
-			List<Credential> updatedCredentials = new ArrayList<>(config.credentials());
-			updatedCredentials.remove(existing);
-			updatedCredentials.add(updated);
-
-			config.updateAllStoredCredentials(updatedCredentials);
-		}
-	}
-
-
+    @Override public void incrementCredentialCounter(String rpId, AttestationKeyPair keys) {
+        synchronized (config) {
+            List<Credential> next = new ArrayList<>(config.credentials());
+            for (int index = 0; index < next.size(); index++) {
+                Credential old = next.get(index);
+                if (old.relayingPartyId().equals(rpId) && old.keyPair().equals(keys)) {
+                    if (old.signatureCount() < 0 || old.signatureCount() == Integer.MAX_VALUE) {
+                        throw new IllegalStateException("Signature counter exhausted");
+                    }
+                    next.set(index, ImmutableCredential.builder().from(old)
+                            .signatureCount(old.signatureCount() + 1).build());
+                    config.updateAllStoredCredentials(next);
+                    return;
+                }
+            }
+            throw new IllegalStateException("Credential disappeared before counter commit");
+        }
+    }
 }

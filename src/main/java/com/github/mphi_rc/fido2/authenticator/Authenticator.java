@@ -1,13 +1,14 @@
 package com.github.mphi_rc.fido2.authenticator;
 
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
-import java.util.Objects;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
+import java.util.stream.Collectors;
 
 import com.github.mphi_rc.fido2.ConfigurationFile;
 import com.github.mphi_rc.fido2.authenticator.crypto.Algorithm;
@@ -15,173 +16,238 @@ import com.github.mphi_rc.fido2.authenticator.crypto.AttestationKeyPair;
 import com.github.mphi_rc.fido2.authenticator.crypto.Ed25519AttestationKeyPair;
 import com.github.mphi_rc.fido2.authenticator.crypto.P256AttestationKeyPair;
 import com.github.mphi_rc.fido2.authenticator.user.UserVerifier;
-import com.github.mphi_rc.fido2.protocol.ctap2.AuthenticatorData;
-import com.github.mphi_rc.fido2.protocol.ctap2.Ctap2ResponseCode;
-import com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionRequest;
-import com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionResponse;
-import com.github.mphi_rc.fido2.protocol.ctap2.GetInfoResponse;
-import com.github.mphi_rc.fido2.protocol.ctap2.GetInfoResponse.Version;
-import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableAuthenticatorData;
-import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetAssertionResponse;
-import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetInfoResponse;
-import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableMakeCredentialResponse;
-import com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse;
+import com.github.mphi_rc.fido2.protocol.ctap2.*;
+import com.github.mphi_rc.fido2.protocol.usbhid.ChannelId;
+import com.github.mphi_rc.fido2.protocol.usbhid.ImmutableChannelId;
 
+/** Experimental software authenticator. Headless UP is simulated, not a physical gesture. */
 public class Authenticator {
+    private static final long ASSERTION_TIMEOUT = TimeUnit.SECONDS.toNanos(30);
+    private static final ChannelId INTERNAL_CHANNEL = ImmutableChannelId.of(new byte[]{0, 0, 0, 1});
+    private final ConfigurationFile config;
+    private final CredentialStore credentialStore;
+    private final PinState pinState;
+    private final UserVerifier userVerifier;
+    private final boolean residentKeysEnabled;
+    private final LongSupplier clock;
+    // One bounded sequence, bound to its originating HID CID. Never serialized.
+    private Pending pending;
 
-	private static final Logger log = LoggerFactory.getLogger(Authenticator.class);
+    public Authenticator(ConfigurationFile config, CredentialStore store, PinState pin) {
+        this(config, store, pin, Boolean.getBoolean("pikeyua.experimentalRk"), System::nanoTime);
+    }
 
-	private final ConfigurationFile config;
-	private final CredentialStore credentialStore;
-	private final PinState pinState;
-	private final UserVerifier userVerifier;
+    /** Explicit policy/clock injection is also used by deterministic protocol tests. */
+    public Authenticator(ConfigurationFile config, CredentialStore store, PinState pin,
+            boolean residentKeysEnabled, LongSupplier monotonicClock) {
+        this.config = config;
+        this.credentialStore = store;
+        this.pinState = pin;
+        this.userVerifier = config.userVerifier();
+        this.residentKeysEnabled = residentKeysEnabled;
+        this.clock = monotonicClock;
+    }
 
-	public Authenticator(ConfigurationFile config, CredentialStore credentialStore, PinState pinState) {
-		this.config = config;
-		this.credentialStore = credentialStore;
-		this.pinState = pinState;
-		this.userVerifier = config.userVerifier();
-	}
+    public synchronized void cancelAssertionSequence() {
+        if (pending != null) Arrays.fill(pending.hash, (byte) 0);
+        pending = null;
+    }
 
-	public Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(byte[] clientDataHash, String relayingPartyId,
-			byte[] userId, Set<Integer> supportedAlgorithmIds, Optional<byte[]> pinAuth) {
+    public synchronized Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(
+            MakeCredentialRequest request) {
+        cancelAssertionSequence();
+        if (request.upOptionPresent()) return Result.err(Ctap2ResponseCode.INVALID_OPTION);
+        if (request.userVerificationRequested()
+                || (request.residentKeyRequested() && !residentKeysEnabled)) {
+            return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
+        }
+        // This project's headless verifier auto-approves. It must not be mistaken for physical UP.
+        if (!userVerifier.isRegistrationApproved(request.relayingPartyId())) {
+            return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
+        }
+        for (Credential known : credentialStore.getCredentials(request.relayingPartyId())) {
+            if (containsId(request.excludedCredentialIds(), known.id())) {
+                return Result.err(Ctap2ResponseCode.CREDENTIAL_EXCLUDED);
+            }
+        }
+        Algorithm algorithm = config.enabledAlgorithms().stream()
+                .filter(a -> request.supportedAlgorithmIds().contains(a.getCoseAlgorithmId()))
+                .findFirst().orElse(null);
+        if (algorithm == null) return Result.err(Ctap2ResponseCode.UNSUPPORTED_ALGORITHM);
+        Optional<Ctap2ResponseCode> error = checkPin(request.clientDataHash(), request.pinAuth(),
+                request.pinProtocolVersion(), true);
+        if (error.isPresent()) return Result.err(error.get());
+        boolean verified = request.pinAuth().isPresent();
 
-		Algorithm algorithmToUse = null;
-		for (Algorithm algorithm : config.enabledAlgorithms()) {
-			if (supportedAlgorithmIds.contains(algorithm.getCoseAlgorithmId())) {
-				algorithmToUse = algorithm;
-				break;
-			}
-		}
-		if (Objects.isNull(algorithmToUse)) {
-			return Result.err(Ctap2ResponseCode.UNSUPPORTED_ALGORITHM);
-		}
+        AttestationKeyPair keys;
+        switch (algorithm) {
+            case P256_ECDSA: keys = P256AttestationKeyPair.generate(); break;
+            case Ed25519: keys = Ed25519AttestationKeyPair.generate(); break;
+            default: return Result.err(Ctap2ResponseCode.UNSUPPORTED_ALGORITHM);
+        }
+        final Credential credential;
+        try {
+            credential = credentialStore.saveCredential(request.relayingPartyId(), request.userId(),
+                    keys, request.residentKeyRequested(), request.userName(), request.userDisplayName());
+        } catch (CredentialStore.Full full) {
+            return Result.err(Ctap2ResponseCode.KEY_STORE_FULL);
+        }
+        // A persistence error deliberately propagates: never emit success using uncommitted state.
+        AuthenticatorData data = ImmutableAuthenticatorData.builder()
+                .relayingPartyId(request.relayingPartyId())
+                .attestedCredentialData(keys.encodeAttestedCredentialData(config.getAaguid(), credential.id()))
+                .isUserPresent(true).isUserVerified(verified).signatureCount(0).build();
+        return Result.ok(ImmutableMakeCredentialResponse.builder().format("packed")
+                .algorithm(algorithm.getCoseAlgorithmId()).authData(data.asBytes())
+                .signature(keys.sign(data, request.clientDataHash())).build());
+    }
 
-		if (!userVerifier.isRegistrationApproved(relayingPartyId)) {
-			return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
-		}
+    /** Compatibility entry point for pre-existing in-process callers. */
+    public Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(byte[] hash, String rpId,
+            byte[] userId, Set<Integer> algorithms, Optional<byte[]> pinAuth) {
+        ImmutableMakeCredentialRequest.Builder builder = ImmutableMakeCredentialRequest.builder()
+                .clientDataHash(hash).relayingPartyId(rpId).userId(userId)
+                .addAllSupportedAlgorithmIds(algorithms).pinAuth(pinAuth);
+        if (pinAuth.isPresent()) builder.pinProtocolVersion(1);
+        return makeCredential(builder.build());
+    }
 
-		AttestationKeyPair keypair = null;
-		switch (algorithmToUse) {
-		case Ed25519:
-			keypair = Ed25519AttestationKeyPair.generate();
-			break;
-		case P256_ECDSA:
-			keypair = P256AttestationKeyPair.generate();
-			break;
-		}
-		Credential cred = credentialStore.saveCredential(relayingPartyId, userId, keypair);
+    public Result<GetAssertionResponse, Ctap2ResponseCode> getAssertion(GetAssertionRequest request) {
+        return getAssertion(request, INTERNAL_CHANNEL);
+    }
 
-		byte[] attestedCredentialData = keypair.encodeAttestedCredentialData(config.getAaguid(), cred.id());
+    public synchronized Result<GetAssertionResponse, Ctap2ResponseCode> getAssertion(
+            GetAssertionRequest request, ChannelId channel) {
+        cancelAssertionSequence();
+        if (request.userVerificationRequested() || !request.userPresenceRequested()) {
+            return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
+        }
+        if (!userVerifier.isAuthenticationApproved(request.relayingPartyId())) {
+            return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
+        }
+        Optional<Ctap2ResponseCode> error = checkPin(request.clientDataHash(), request.pinAuth(),
+                request.pinProtocolVersion(), false);
+        if (error.isPresent()) return Result.err(error.get());
+        boolean discovery = request.publicKeyIds().isEmpty();
+        if (discovery && !residentKeysEnabled) return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
+        List<Credential> eligible = credentialStore.getCredentials(request.relayingPartyId()).stream()
+                .filter(c -> discovery ? c.discoverable() : containsId(request.publicKeyIds(), c.id()))
+                .sorted(Comparator.comparingLong((Credential c) -> c.creation().toEpochMilli()).reversed()
+                        .thenComparing((a, b) -> compareIds(a.id(), b.id())))
+                .collect(Collectors.toList());
+        if (eligible.isEmpty()) return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
+        if (discovery && eligible.size() > CredentialStore.MAX_DISCOVERABLE_CREDENTIALS) {
+            return Result.err(Ctap2ResponseCode.LIMIT_EXCEEDED);
+        }
+        Credential first = eligible.get(0);
+        if (counterExhausted(first)) return Result.err(Ctap2ResponseCode.OTHER);
+        boolean verified = request.pinAuth().isPresent();
+        int count = discovery && eligible.size() > 1 ? eligible.size() : 0;
+        GetAssertionResponse response = sign(first, request.clientDataHash(), verified, count);
+        if (count > 1) {
+            pending = new Pending(channel.id(), request.relayingPartyId(), request.clientDataHash(),
+                    verified, eligible, clock.getAsLong());
+        }
+        return Result.ok(response);
+    }
 
-		boolean isUserVerified = false;
-		// According to the FIDO2 spec, we should return PIN_NOT_SET or PIN_INVALID if len(pinAuth) == 0. But Google Chrome doesn't
-		// appear to react to that and times out, so we work around this by returning a "successful" non-user verified response.
-		
-		if (pinAuth.isPresent() && pinAuth.get().length != 0) {
-			
-			Optional<Ctap2ResponseCode> maybeError = pinState.isPinAuthValid(clientDataHash, pinAuth.get());
-			if (maybeError.isPresent()) {
-				log.info("pin auth was present but did not succeed, sending {}", maybeError.get());
-				return Result.err(maybeError.get());
-			}
-			log.info("pin auth succeeded");
-			isUserVerified = true;
-		}
+    public synchronized Result<GetAssertionResponse, Ctap2ResponseCode> getNextAssertion(ChannelId channel) {
+        Pending sequence = pending;
+        long elapsed = sequence == null ? 0 : clock.getAsLong() - sequence.lastResponse;
+        if (sequence == null || !Arrays.equals(sequence.channel, channel.id())
+                || elapsed < 0 || elapsed > ASSERTION_TIMEOUT
+                || sequence.nextIndex >= sequence.ids.size()) {
+            cancelAssertionSequence();
+            return Result.err(Ctap2ResponseCode.NOT_ALLOWED);
+        }
+        byte[] id = sequence.ids.get(sequence.nextIndex);
+        Credential credential = credentialStore.getCredentials(sequence.rpId).stream()
+                .filter(c -> c.discoverable() && Arrays.equals(c.id(), id)).findFirst().orElse(null);
+        if (credential == null) {
+            cancelAssertionSequence();
+            return Result.err(Ctap2ResponseCode.NOT_ALLOWED);
+        }
+        if (counterExhausted(credential)) {
+            cancelAssertionSequence();
+            return Result.err(Ctap2ResponseCode.OTHER);
+        }
+        try {
+            GetAssertionResponse response = sign(credential, sequence.hash, sequence.verified, 0);
+            sequence.nextIndex++;
+            sequence.lastResponse = clock.getAsLong();
+            if (sequence.nextIndex == sequence.ids.size()) cancelAssertionSequence();
+            return Result.ok(response);
+        } catch (RuntimeException error) {
+            cancelAssertionSequence();
+            throw error; // A failed durable update must never return a successful signature.
+        }
+    }
 
-		AuthenticatorData authData = ImmutableAuthenticatorData.builder()
-				.relayingPartyId(relayingPartyId)
-				.attestedCredentialData(attestedCredentialData)
-				.isUserPresent(true)
-				.isUserVerified(isUserVerified)
-				.signatureCount(0)
-				.build();
+    private GetAssertionResponse sign(Credential credential, byte[] hash, boolean verified, int count) {
+        AuthenticatorData data = ImmutableAuthenticatorData.builder()
+                .relayingPartyId(credential.relayingPartyId()).isUserPresent(true)
+                .isUserVerified(verified).signatureCount(credential.signatureCount() + 1).build();
+        byte[] signature = credential.keyPair().sign(data, hash);
+        credentialStore.incrementCredentialCounter(credential.relayingPartyId(), credential.keyPair());
+        return ImmutableGetAssertionResponse.builder().credentialId(credential.id())
+                .authData(data.asBytes()).signature(signature).userId(credential.userId())
+                .includeUser(credential.discoverable()).numberOfCredentials(count).build();
+    }
 
-		byte[] signature = keypair.sign(authData, clientDataHash);
-		MakeCredentialResponse response = ImmutableMakeCredentialResponse.builder()
-				.format("packed")
-				.signature(signature)
-				.algorithm(algorithmToUse.getCoseAlgorithmId())
-				.authData(authData.asBytes())
-				.build();
-		return Result.ok(response);
-	}
+    private Optional<Ctap2ResponseCode> checkPin(byte[] hash, Optional<byte[]> auth,
+            Optional<Integer> protocol, boolean registration) {
+        if (!auth.isPresent()) {
+            return registration && pinState.isPinSet()
+                    ? Optional.of(Ctap2ResponseCode.PIN_REQUIRED) : Optional.empty();
+        }
+        // Empty pinAuth is the CTAP2.0 authenticator selection probe, not a registration.
+        if (auth.get().length == 0) return Optional.of(pinState.isPinSet()
+                ? Ctap2ResponseCode.PIN_INVALID : Ctap2ResponseCode.PIN_NOT_SET);
+        if (!protocol.isPresent() || protocol.get() != 1 || auth.get().length != 16) {
+            return Optional.of(Ctap2ResponseCode.PIN_AUTH_INVALID);
+        }
+        return pinState.isPinAuthValid(hash, auth.get());
+    }
 
-	public Result<GetAssertionResponse, Ctap2ResponseCode> getAssertion(GetAssertionRequest request) {
-		Collection<Credential> creds = credentialStore.getCredentials(request.relayingPartyId());
-		if (creds.isEmpty()) {
-			return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
-		}
+    private static boolean counterExhausted(Credential c) {
+        return c.signatureCount() < 0 || c.signatureCount() == Integer.MAX_VALUE;
+    }
 
-		if (!userVerifier.isAuthenticationApproved(request.relayingPartyId())) {
-			return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
-		}
+    private static boolean containsId(List<byte[]> list, byte[] id) {
+        for (byte[] candidate : list) if (Arrays.equals(candidate, id)) return true;
+        return false;
+    }
 
-		Credential cred;
-		if (request.publicKeyIds().isEmpty()) {
-			cred = creds.iterator().next();
-		} else {
-			Optional<Credential> matchingCredential = creds.stream()
-					.filter(c -> {
-						for (byte[] validId : request.publicKeyIds()) {
-							if (Arrays.equals(validId, c.id())) {
-								return true;
-							}
-						}
-						return false;
-					})
-					.findAny();
+    private static int compareIds(byte[] a, byte[] b) {
+        for (int i = 0; i < Math.min(a.length, b.length); i++) {
+            int comparison = Integer.compare(a[i] & 255, b[i] & 255);
+            if (comparison != 0) return comparison;
+        }
+        return Integer.compare(a.length, b.length);
+    }
 
-			if (!matchingCredential.isPresent()) {
-				return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
-			}
-			cred = matchingCredential.get();
-		}
+    public GetInfoResponse getInfo() {
+        return ImmutableGetInfoResponse.builder().version(GetInfoResponse.Version.FIDO_2_0)
+                .aaguid(config.getAaguid()).isPinConfigured(pinState.isPinSet())
+                .residentKeySupported(residentKeysEnabled).build();
+    }
 
-		boolean isUserVerified = false;
-		// According to the FIDO2 spec, we should return PIN_NOT_SET or PIN_INVALID if len(pinAuth) == 0. But Google Chrome doesn't
-		// appear to react to that and times out, so we work around this by returning a "successful" non-user verified response.
-		
-		Optional<byte[]> pinAuth = request.pinAuth();  
-		if (pinAuth.isPresent() && pinAuth.get().length != 0) {
-			Optional<Ctap2ResponseCode> maybeError = pinState.isPinAuthValid(request.clientDataHash(), pinAuth.get());
-			if (maybeError.isPresent()) {
-				log.info("pin auth was present but did not succeed, sending {}", maybeError.get());
-				return Result.err(maybeError.get());
-			}
-			log.info("pin auth succeeded");
-			isUserVerified = true;
-		}
-
-		AuthenticatorData authData = ImmutableAuthenticatorData.builder()
-				.isUserPresent(true)
-				.isUserVerified(isUserVerified)
-				.signatureCount(cred.signatureCount() + 1)
-				.relayingPartyId(request.relayingPartyId())
-				.build();
-
-		AttestationKeyPair keyPair = cred.keyPair();
-		byte[] signature = keyPair.sign(authData, request.clientDataHash());
-		credentialStore.incrementCredentialCounter(request.relayingPartyId(), keyPair);
-
-		GetAssertionResponse response = ImmutableGetAssertionResponse.builder()
-				.credentialId(cred.id())
-				.authData(authData.asBytes())
-				.signature(signature)
-				.userId(cred.userId())
-				.build();
-		return Result.ok(response);
-	}
-
-	public GetInfoResponse getInfo() {
-		return ImmutableGetInfoResponse.of(Version.FIDO_2_0, config.getAaguid(), pinState.isPinSet());
-	}
-
-	void reset() {
-		throw new UnsupportedOperationException("Reset is not implemented");
-	}
-
-	void getNextAssertion() {
-		throw new UnsupportedOperationException("GetNextAssertion is not implemented");
-	}
+    private static final class Pending {
+        final byte[] channel;
+        final String rpId;
+        final byte[] hash;
+        final boolean verified;
+        final List<byte[]> ids = new ArrayList<>();
+        int nextIndex = 1;
+        long lastResponse;
+        Pending(byte[] channel, String rpId, byte[] hash, boolean verified,
+                List<Credential> credentials, long now) {
+            this.channel = channel.clone();
+            this.rpId = rpId;
+            this.hash = hash.clone();
+            this.verified = verified;
+            for (Credential credential : credentials) ids.add(credential.id().clone());
+            this.lastResponse = now;
+        }
+    }
 }

@@ -27,7 +27,6 @@ import org.slf4j.LoggerFactory;
 import com.github.mphi_rc.fido2.ConfigurationFile;
 import com.github.mphi_rc.fido2.protocol.ctap2.Ctap2ResponseCode;
 import com.google.common.hash.Hashing;
-import com.google.common.io.BaseEncoding;
 
 
 public class PinState {
@@ -90,7 +89,7 @@ public class PinState {
 			ByteBuffer.wrap(mac).get(expectedAuth);
 
 			if (!MessageDigest.isEqual(expectedAuth, auth)) {
-				log.info("Computed auth tag {} doesn't match sent auth tag {}", expectedAuth, auth);
+				log.info("PIN authentication tag validation failed");
 				return Ctap2ResponseCode.PIN_AUTH_INVALID;
 			}
 
@@ -139,7 +138,7 @@ public class PinState {
 			ByteBuffer.wrap(mac).get(expectedAuth);
 
 			if (!MessageDigest.isEqual(expectedAuth, auth)) {
-				log.info("Computed auth tag {} doesn't match sent auth tag {}", expectedAuth, auth);
+				log.info("PIN authentication tag validation failed");
 				return Ctap2ResponseCode.PIN_AUTH_INVALID;
 			}
 			
@@ -205,9 +204,6 @@ public class PinState {
 			aes.init(Cipher.DECRYPT_MODE, aesKey, iv);
 			byte[] pinHash = aes.doFinal(encryptedPinHash);
 			
-			log.info("encrypted pin hash is {}", BaseEncoding.base16().encode(encryptedPinHash));
-			log.info("decrypted pin hash is {}", BaseEncoding.base16().encode(pinHash));
-			log.info("stored lower hashed new pin is {}", BaseEncoding.base16().encode(config.pinHash().get()));
 			
 			if (!MessageDigest.isEqual(pinHash, config.pinHash().get())) {
 				log.info("Encrypted PIN hash doesn't match stored PIN hash");
@@ -249,8 +245,6 @@ public class PinState {
 			ByteBuffer.wrap(mac).get(expectedAuth);
 			
 			if (!MessageDigest.isEqual(expectedAuth, pinAuth)) {
-				log.info("expected auth {}", BaseEncoding.base16().encode(expectedAuth));
-				log.info("provided auth {}", BaseEncoding.base16().encode(pinAuth));
 				return Optional.of(Ctap2ResponseCode.PIN_AUTH_INVALID);
 			}
 			

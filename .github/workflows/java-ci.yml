@@ -2,7 +2,7 @@ name: Java CI
 
 on:
   push:
-    branches: [main, v7.1-persistence]
+    branches: [main, v7.1-persistence, feature/v7.2-discoverable-credentials]
   pull_request:
 
 permissions:
@@ -30,13 +30,56 @@ jobs:
         run: bash scripts/test-cutover-mock.sh
       - name: Test and assemble
         run: gradle --no-daemon test shadowJar
+      - name: Summarize unit results
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          reports = [ET.parse(p).getroot() for p in glob.glob('build/test-results/test/TEST-*.xml')]
+          total = sum(int(r.get('tests', 0)) for r in reports)
+          failed = sum(int(r.get('failures', 0)) + int(r.get('errors', 0)) for r in reports)
+          skipped = sum(int(r.get('skipped', 0)) for r in reports)
+          assert total > 0 and failed == 0 and skipped == 0
+          print(f'UNIT RESULTS: {total} passed, {failed} failed, {skipped} skipped')
+          PY
       - name: Multi-process persistence and failure tests
         run: sh scripts/verify-persistence.sh build/libs/pikeyua.jar
+      - name: V7.1 to V7.2 independent-JVM migration regression
+        run: sh scripts/verify-v72-migration.sh build/libs/pikeyua.jar
+      - name: Resident credential CTAP lifecycle across independent JVMs
+        run: java -cp build/libs/pikeyua.jar com.github.mphi_rc.fido2.ResidentCredentialProbe
+      - name: Checkout immutable V7.1 baseline for cross-version compatibility
+        if: matrix.java == '17'
+        uses: actions/checkout@v4
+        with:
+          ref: 2b2183924a2dfca16327a8b7dc0940e37a563381
+          path: _v71_reference
+      - name: Build original V7.1 candidate for migration test
+        if: matrix.java == '17'
+        run: gradle -p _v71_reference --no-daemon shadowJar
+      - name: Verify real V7.1 JSON against V7.2 migration
+        if: matrix.java == '17'
+        run: sh scripts/verify-v72-cross-version.sh _v71_reference/build/libs/pikeyua.jar build/libs/pikeyua.jar
       - name: Upload test-only ARM-compatible Java JAR
         if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/v7.1-persistence'
         uses: actions/upload-artifact@v4
         with:
           name: pikeyua-v7.1-candidate-jdk17
           path: build/libs/pikeyua.jar
+          if-no-files-found: error
+          retention-days: 7
+      - name: Package isolated V7.2 test candidate
+        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.2-discoverable-credentials'
+        run: |
+          mkdir -p build/rk-candidate
+          cp build/libs/pikeyua.jar build/rk-candidate/
+          printf '%s\n' "$GITHUB_SHA" > build/rk-candidate/COMMIT.txt
+          (cd build/rk-candidate && sha256sum pikeyua.jar > SHA256SUMS)
+          printf '%s\n' 'TEST ONLY. Do not replace the live V7.1 service or use live credential state.' 'Run: java -cp pikeyua.jar com.github.mphi_rc.fido2.ResidentCredentialProbe' > build/rk-candidate/TEST_ONLY.txt
+      - name: Upload isolated V7.2 test candidate
+        if: matrix.java == '17' && github.event_name == 'push' && github.ref == 'refs/heads/feature/v7.2-discoverable-credentials'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pikeyua-v7.2-rk-lab-jdk17
+          path: build/rk-candidate/
           if-no-files-found: error
           retention-days: 7
