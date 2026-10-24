@@ -274,4 +274,56 @@ public class CtapRequestParsingTest {
         assertArrayEquals(new byte[]{ 0x2b }, answer(handler(state), (byte) 0x01, request));
         assertEquals(0, state.credentials().size());
     }
+    @Test public void upOptionInMakeCredentialRejectedWithoutStateMutation() throws Exception {
+        ConfigurationFile state = config();
+        Map request = baseMake();
+        Map options = new Map();
+        options.put(new UnicodeString("up"), SimpleValue.TRUE);
+        request.put(new UnsignedInteger(7), options);
+        assertArrayEquals(new byte[]{ 0x2c },
+                answer(handler(state), (byte) 0x01, request));
+        assertEquals(0, state.credentials().size());
+    }
+
+    @Test public void exclusionDoesNotExposeCredentialsOwnedByAnotherRp() throws Exception {
+        ConfigurationFile state = config();
+        Credential other = new ConfigurationCredentialStore(state).saveCredential(
+                "other.example.invalid", new byte[]{ 5 }, P256AttestationKeyPair.generate());
+        Map request = baseMake();
+        Array ids = new Array();
+        ids.add(descriptor(other.id()));
+        request.put(new UnsignedInteger(5), ids);
+        byte[] result = answer(handler(state), (byte) 0x01, request);
+        assertEquals(0, result[0]); // Ordinary non-RK credential created.
+        assertEquals(2, state.credentials().size());
+    }
+
+    @Test public void requestedAssertionUvCannotSucceedOrAdvanceCounter() throws Exception {
+        ConfigurationFile state = config();
+        Credential existing = new ConfigurationCredentialStore(state).saveCredential(
+                RP, new byte[]{ 1 }, P256AttestationKeyPair.generate());
+        Map assertion = baseAssertion();
+        Array ids = new Array();
+        ids.add(descriptor(existing.id()));
+        assertion.put(new UnsignedInteger(3), ids);
+        Map options = new Map();
+        options.put(new UnicodeString("uv"), SimpleValue.TRUE);
+        assertion.put(new UnsignedInteger(5), options);
+        assertArrayEquals(new byte[]{ 0x2b },
+                answer(handler(state), (byte) 0x02, assertion));
+        assertEquals(0, state.credentials().get(0).signatureCount());
+    }
+
+    @Test public void metadataCannotEnableUnimplementedDiscovery() throws Exception {
+        ConfigurationFile state = config();
+        Credential existing = new ConfigurationCredentialStore(state).saveCredential(
+                RP, new byte[]{ 1 }, P256AttestationKeyPair.generate());
+        Credential flagged = com.github.mphi_rc.fido2.authenticator.ImmutableCredential.builder()
+                .from(existing).discoverable(true).build();
+        state.updateAllStoredCredentials(Collections.singletonList(flagged));
+        assertArrayEquals(new byte[]{ 0x2e },
+                answer(handler(state), (byte) 0x02, baseAssertion()));
+        assertEquals(0, state.credentials().get(0).signatureCount());
+    }
+
 }
