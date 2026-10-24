@@ -16,7 +16,6 @@ import com.github.mphi_rc.fido2.protocol.usbhid.HidError;
 import com.github.mphi_rc.fido2.protocol.usbhid.ImmutableRawMessage;
 import com.github.mphi_rc.fido2.protocol.usbhid.RawMessage;
 
-import co.nstant.in.cbor.CborBuilder;
 import co.nstant.in.cbor.CborDecoder;
 import co.nstant.in.cbor.CborEncoder;
 import co.nstant.in.cbor.CborException;
@@ -47,16 +46,11 @@ public class AuthenticatorRequestHandler {
 
 	private byte[] asPayload(Ctap2ResponseCode code, List<DataItem> parameterMap) {
 		ByteArrayOutputStream payload = new ByteArrayOutputStream();
-		CborEncoder encoder = new CborEncoder(payload);
-		CborBuilder builder = new CborBuilder()
-				.add(code.asBytes()[0]);
-		for (DataItem i : parameterMap) {
-			builder = builder.add(i);
-		}
+		payload.write(code.asBytes()[0]); // CTAP status byte is NOT CBOR-encoded
 		try {
-			encoder.encode(builder.build());
+			new CborEncoder(payload).encode(parameterMap);
 		} catch (CborException e) {
-			throw new RuntimeException(e);
+			throw new IllegalStateException("Unable to encode CTAP2 response", e);
 		}
 		return payload.toByteArray();
 	}
@@ -71,12 +65,9 @@ public class AuthenticatorRequestHandler {
 
 		byte[] params = new byte[payload.length - 1];
 		System.arraycopy(payload, 1, params, 0, payload.length - 1);
-		try {
-			log.debug("Received CBOR request with method {} and body {}", method, CborDecoder.decode(params));
-		} catch (CborException e) {
-			log.error("Unable to deserialize CBOR parameters", e);
-			return failure(channelId, Ctap2ResponseCode.INVALID_CBOR);
-		}
+		// Do not log decoded request bodies: they may contain user handles,
+		// CBOR credential identifiers or sensitive pinUvAuth values.
+		log.debug("Received CTAP2 CBOR method {}", method);
 
 		try {
 			switch (method) {
@@ -103,8 +94,7 @@ public class AuthenticatorRequestHandler {
 
 			case MAKE_CREDENTIAL:
 				MakeCredentialRequest request = MakeCredentialRequest.fromBytes(params);
-				Result<MakeCredentialResponse, Ctap2ResponseCode> result = authenticator.makeCredential(request.clientDataHash(),
-						request.relayingPartyId(), request.userId(), request.supportedAlgorithmIds(), request.pinAuth());
+				Result<MakeCredentialResponse, Ctap2ResponseCode> result = authenticator.makeCredential(request);
 				byte[] credential = result
 						.handleError(err -> asPayload(err, Collections.emptyList()))
 						.elseGet(value -> asPayload(Ctap2ResponseCode.OK, value.asCborMap()));

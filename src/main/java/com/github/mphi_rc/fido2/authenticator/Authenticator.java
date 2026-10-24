@@ -25,6 +25,7 @@ import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableAuthenticatorData;
 import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetAssertionResponse;
 import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetInfoResponse;
 import com.github.mphi_rc.fido2.protocol.ctap2.ImmutableMakeCredentialResponse;
+import com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialRequest;
 import com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse;
 
 public class Authenticator {
@@ -41,6 +42,33 @@ public class Authenticator {
 		this.credentialStore = credentialStore;
 		this.pinState = pinState;
 		this.userVerifier = config.userVerifier();
+	}
+
+	/**
+	 * CTAP2.0 makeCredential preflight. Discoverable keys remain intentionally
+	 * unavailable until multi-assertion support is implemented and tested.
+	 */
+	public Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(MakeCredentialRequest request) {
+		if (request.upOptionPresent()) return Result.err(Ctap2ResponseCode.INVALID_OPTION);
+		if (request.userVerificationRequested() || request.residentKeyRequested()) {
+			return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
+		}
+		// Only compare credentials belonging to the supplied RP; do not disclose
+		// registrations for other relying parties.
+		if (!request.excludedCredentialIds().isEmpty()) {
+			for (Credential credential : credentialStore.getCredentials(request.relayingPartyId())) {
+				for (byte[] excludedId : request.excludedCredentialIds()) {
+					if (Arrays.equals(credential.id(), excludedId)) {
+						if (!userVerifier.isRegistrationApproved(request.relayingPartyId())) {
+							return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
+						}
+						return Result.err(Ctap2ResponseCode.CREDENTIAL_EXCLUDED);
+					}
+				}
+			}
+		}
+		return makeCredential(request.clientDataHash(), request.relayingPartyId(),
+				request.userId(), request.supportedAlgorithmIds(), request.pinAuth());
 	}
 
 	public Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(byte[] clientDataHash, String relayingPartyId,
@@ -61,19 +89,6 @@ public class Authenticator {
 			return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
 		}
 
-		AttestationKeyPair keypair = null;
-		switch (algorithmToUse) {
-		case Ed25519:
-			keypair = Ed25519AttestationKeyPair.generate();
-			break;
-		case P256_ECDSA:
-			keypair = P256AttestationKeyPair.generate();
-			break;
-		}
-		Credential cred = credentialStore.saveCredential(relayingPartyId, userId, keypair);
-
-		byte[] attestedCredentialData = keypair.encodeAttestedCredentialData(config.getAaguid(), cred.id());
-
 		boolean isUserVerified = false;
 		// According to the FIDO2 spec, we should return PIN_NOT_SET or PIN_INVALID if len(pinAuth) == 0. But Google Chrome doesn't
 		// appear to react to that and times out, so we work around this by returning a "successful" non-user verified response.
@@ -88,6 +103,21 @@ public class Authenticator {
 			log.info("pin auth succeeded");
 			isUserVerified = true;
 		}
+
+
+		AttestationKeyPair keypair = null;
+		switch (algorithmToUse) {
+		case Ed25519:
+			keypair = Ed25519AttestationKeyPair.generate();
+			break;
+		case P256_ECDSA:
+			keypair = P256AttestationKeyPair.generate();
+			break;
+		}
+		Credential cred = credentialStore.saveCredential(relayingPartyId, userId, keypair);
+
+		byte[] attestedCredentialData = keypair.encodeAttestedCredentialData(config.getAaguid(), cred.id());
+
 
 		AuthenticatorData authData = ImmutableAuthenticatorData.builder()
 				.relayingPartyId(relayingPartyId)
@@ -108,6 +138,14 @@ public class Authenticator {
 	}
 
 	public Result<GetAssertionResponse, Ctap2ResponseCode> getAssertion(GetAssertionRequest request) {
+		if (request.userVerificationRequested() || !request.userPresenceRequested()) {
+			return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
+		}
+		// Phase B does not yet implement discovery or GetNextAssertion.
+		// An absent/empty allowList cannot select any legacy non-RK key.
+		if (request.publicKeyIds().isEmpty()) {
+			return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
+		}
 		Collection<Credential> creds = credentialStore.getCredentials(request.relayingPartyId());
 		if (creds.isEmpty()) {
 			return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
@@ -118,9 +156,7 @@ public class Authenticator {
 		}
 
 		Credential cred;
-		if (request.publicKeyIds().isEmpty()) {
-			cred = creds.iterator().next();
-		} else {
+		{
 			Optional<Credential> matchingCredential = creds.stream()
 					.filter(c -> {
 						for (byte[] validId : request.publicKeyIds()) {
