@@ -326,4 +326,29 @@ public class CtapRequestParsingTest {
         assertEquals(0, state.credentials().get(0).signatureCount());
     }
 
+    @Test public void legacyAllowListedAssertionStillSucceedsAndPersistsCounter() throws Exception {
+        ConfigurationFile state = config();
+        Credential old = new ConfigurationCredentialStore(state).saveCredential(
+                RP, new byte[]{ 1, 2, 3 }, P256AttestationKeyPair.generate());
+        Map assertion = baseAssertion();
+        Array list = new Array();
+        list.add(descriptor(old.id()));
+        assertion.put(new UnsignedInteger(3), list);
+        byte[] result = answer(handler(state), (byte) 0x02, assertion);
+        assertEquals(0, result[0]); // Successful CTAP2 status.
+        assertTrue("Successful assertion must include CBOR response", result.length > 1);
+        assertEquals(1, state.credentials().get(0).signatureCount());
+        Path saved = folder.getRoot().toPath().resolve("private").resolve("config.json");
+        assertEquals(1, new ConfigurationFile(saved).credentials().get(0).signatureCount());
+    }
+
+    @Test public void getInfoDoesNotAdvertiseRkBeforeRealImplementation() throws Exception {
+        ConfigurationFile state = config();
+        PinState pin = new PinState(state);
+        Authenticator auth = new Authenticator(state, new ConfigurationCredentialStore(state), pin);
+        Map getInfo = (Map) auth.getInfo().asCborMap().get(0);
+        Map options = (Map) getInfo.get(new UnsignedInteger(4));
+        assertEquals(SimpleValue.FALSE, options.get(new UnicodeString("rk")));
+    }
+
 }
