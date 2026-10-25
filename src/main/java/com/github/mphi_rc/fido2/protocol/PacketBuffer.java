@@ -25,7 +25,9 @@ public class PacketBuffer {
 	}
 	
 	public Optional<RawMessage> constructIfPossible() {
-		if (remainingBytes >= 0) {
+		// Zero is complete too: exact 57 + n*59 byte CTAPHID messages
+		// have no final-report padding and no further continuation to read.
+		if (remainingBytes > 0) {
 			return Optional.empty();
 		}
 		ContinuationPacket[] rest = new ContinuationPacket[nextFragments.size()];
