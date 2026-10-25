@@ -290,11 +290,13 @@ def stable_record(record):
 
 def confirm_delete(identifier):
     try:
-        with open('/dev/tty', 'r+', encoding='utf-8') as terminal:
-            require(terminal.isatty(), 'Deletion requires an interactive terminal.')
-            terminal.write('This removes only the selected credential. It cannot be used for future logins.\n'
+        # A TTY is not seekable: separate read/write streams, not buffered r+.
+        with open('/dev/tty', 'w', encoding='utf-8') as prompt, \
+                open('/dev/tty', 'r', encoding='utf-8') as terminal:
+            require(terminal.isatty() and prompt.isatty(), 'Deletion requires an interactive terminal.')
+            prompt.write('This removes only the selected credential. It cannot be used for future logins.\n'
                            'Type DELETE to confirm, or press Enter to cancel: ')
-            terminal.flush()
+            prompt.flush()
             return terminal.readline().strip() == 'DELETE'
     except OSError:
         raise Refused('Deletion requires an interactive SSH terminal; no --yes mode is provided.') from None
