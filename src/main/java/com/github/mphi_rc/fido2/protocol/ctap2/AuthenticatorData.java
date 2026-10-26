@@ -1,7 +1,6 @@
 package com.github.mphi_rc.fido2.protocol.ctap2;
 
 import java.nio.charset.StandardCharsets;
-import java.util.BitSet;
 import java.util.Optional;
 
 import org.immutables.value.Value;
@@ -28,17 +27,12 @@ public abstract class AuthenticatorData {
 		byte[] bytes = new byte[size];
 		System.arraycopy(rpIdHash, 0, bytes, 0, 32);
 		
-		BitSet flags = new BitSet(7);
-		if (isUserPresent()) {
-			flags.set(0);
-		}
-		if (isUserVerified()) {
-			flags.set(2);
-		}
-		if (attestedCredentialData().isPresent()) {
-			flags.set(6);
-		}
-		bytes[32] = flags.toByteArray()[0];
+		// Silent assertions can legitimately have no flags set (UP=0, UV=0).
+		// BitSet.toByteArray() is empty for zero, but this field is always one byte.
+		int flags = (isUserPresent() ? 0x01 : 0)
+				| (isUserVerified() ? 0x04 : 0)
+				| (attestedCredentialData().isPresent() ? 0x40 : 0);
+		bytes[32] = (byte) flags;
 		bytes[33] = (byte) ((0xFF000000 & signatureCount()) >> 24);
 		bytes[34] = (byte) ((0x00FF0000 & signatureCount()) >> 16);
 		bytes[35] = (byte) ((0x0000FF00 & signatureCount()) >> 8);
