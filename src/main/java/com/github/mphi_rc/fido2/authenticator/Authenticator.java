@@ -95,8 +95,11 @@ public class Authenticator {
     }
     public synchronized Result<GetAssertionResponse, Ctap2ResponseCode> getAssertion(GetAssertionRequest request, ChannelId channel) {
         cancelAssertionSequence();
-        if (request.userVerificationRequested() || !request.userPresenceRequested()) return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
-        if (!userVerifier.isAuthenticationApproved(request.relayingPartyId())) return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
+        if (request.userVerificationRequested()) return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
+        // CTAP2.0 supports up=false, including Chrome's excludeList probes.
+        // Skip the presence ceremony, NOT PIN authorization or RP/ID matching.
+        boolean present = request.userPresenceRequested();
+        if (present && !userVerifier.isAuthenticationApproved(request.relayingPartyId())) return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
         Optional<Ctap2ResponseCode> error = checkPin(request.clientDataHash(), request.pinAuth(), request.pinProtocolVersion(), false);
         if (error.isPresent()) return Result.err(error.get());
         boolean discovery = request.publicKeyIds().isEmpty();
@@ -111,8 +114,8 @@ public class Authenticator {
         if (counterExhausted(first)) return Result.err(Ctap2ResponseCode.OTHER);
         boolean verified = request.pinAuth().isPresent();
         int count = discovery && eligible.size() > 1 ? eligible.size() : 0;
-        GetAssertionResponse response = sign(first, request.clientDataHash(), verified, count);
-        if (count > 1) pending = new Pending(channel.id(), request.relayingPartyId(), request.clientDataHash(), verified, eligible, clock.getAsLong());
+        GetAssertionResponse response = sign(first, request.clientDataHash(), present, verified, count);
+        if (count > 1) pending = new Pending(channel.id(), request.relayingPartyId(), request.clientDataHash(), present, verified, eligible, clock.getAsLong());
         return Result.ok(response);
     }
     public synchronized Result<GetAssertionResponse, Ctap2ResponseCode> getNextAssertion(ChannelId channel) {
@@ -130,16 +133,16 @@ public class Authenticator {
         if (credential == null) { cancelAssertionSequence(); return Result.err(Ctap2ResponseCode.NOT_ALLOWED); }
         if (counterExhausted(credential)) { cancelAssertionSequence(); return Result.err(Ctap2ResponseCode.OTHER); }
         try {
-            GetAssertionResponse response = sign(credential, sequence.hash, sequence.verified, 0);
+            GetAssertionResponse response = sign(credential, sequence.hash, sequence.present, sequence.verified, 0);
             sequence.nextIndex++;
             sequence.lastResponse = clock.getAsLong();
             if (sequence.nextIndex == sequence.ids.size()) cancelAssertionSequence();
             return Result.ok(response);
         } catch (RuntimeException e) { cancelAssertionSequence(); throw e; }
     }
-    private GetAssertionResponse sign(Credential credential, byte[] hash, boolean verified, int count) {
+    private GetAssertionResponse sign(Credential credential, byte[] hash, boolean present, boolean verified, int count) {
         AuthenticatorData data = ImmutableAuthenticatorData.builder().relayingPartyId(credential.relayingPartyId())
-                .isUserPresent(true).isUserVerified(verified).signatureCount(credential.signatureCount() + 1).build();
+                .isUserPresent(present).isUserVerified(verified).signatureCount(credential.signatureCount() + 1).build();
         byte[] signature = credential.keyPair().sign(data, hash);
         credentialStore.incrementCredentialCounter(credential.relayingPartyId(), credential.keyPair());
         return ImmutableGetAssertionResponse.builder().credentialId(credential.id()).authData(data.asBytes())
@@ -173,12 +176,12 @@ public class Authenticator {
     private static final class Pending {
         final byte[] channel, hash;
         final String rpId;
-        final boolean verified;
+        final boolean present, verified;
         final List<byte[]> ids = new ArrayList<>();
         int nextIndex = 1;
         long lastResponse;
-        Pending(byte[] channel, String rpId, byte[] hash, boolean verified, List<Credential> credentials, long now) {
-            this.channel = channel.clone(); this.rpId = rpId; this.hash = hash.clone(); this.verified = verified;
+        Pending(byte[] channel, String rpId, byte[] hash, boolean present, boolean verified, List<Credential> credentials, long now) {
+            this.channel = channel.clone(); this.rpId = rpId; this.hash = hash.clone(); this.present = present; this.verified = verified;
             for (Credential credential : credentials) ids.add(credential.id().clone());
             lastResponse = now;
         }
