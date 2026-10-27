@@ -81,8 +81,9 @@ public final class Pkcs11P256Signer implements AutoCloseable {
                 + "attributes(generate, CKO_PRIVATE_KEY, CKK_EC) = {\n"
                 + " CKA_TOKEN = true\n CKA_PRIVATE = true\n CKA_SENSITIVE = true\n"
                 + " CKA_EXTRACTABLE = false\n CKA_SIGN = true\n CKA_DERIVE = false\n}\n"
+                // TPM2-PKCS11 supports persistent public objects, not session public objects.
                 + "attributes(generate, CKO_PUBLIC_KEY, CKK_EC) = {\n"
-                + " CKA_TOKEN = false\n CKA_VERIFY = true\n}\n";
+                + " CKA_TOKEN = true\n CKA_VERIFY = true\n}\n";
     }
 
     /** Immutable public reference; not a bearer authorization or a hardware claim. */
