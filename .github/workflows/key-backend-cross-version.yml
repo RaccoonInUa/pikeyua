@@ -1,0 +1,37 @@
+name: Key backend cross-version
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/java/com/github/mphi_rc/fido2/authenticator/**'
+      - 'src/test/java/com/github/mphi_rc/fido2/CredentialBackend*'
+      - 'src/test/java/com/github/mphi_rc/fido2/LegacyCredentialReadback.java'
+      - 'scripts/verify-key-backend-cross-version.sh'
+      - '.github/workflows/key-backend-cross-version.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - name: Build and test candidate
+        run: gradle --no-daemon test shadowJar
+      - name: Checkout exact previously tested V7.3
+        uses: actions/checkout@v4
+        with:
+          ref: 35193a6055519655c657e76ba4a83b9821737f3e
+          path: _v73_reference
+      - name: Build original V7.3 without candidate classes
+        run: gradle -p _v73_reference --no-daemon shadowJar
+      - name: Original V7.3 -> backend candidate -> original V7.3
+        run: sh scripts/verify-key-backend-cross-version.sh _v73_reference/build/libs/pikeyua.jar build/libs/pikeyua.jar

@@ -11,9 +11,9 @@ import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 import com.github.mphi_rc.fido2.ConfigurationFile;
 import com.github.mphi_rc.fido2.authenticator.crypto.Algorithm;
-import com.github.mphi_rc.fido2.authenticator.crypto.AttestationKeyPair;
-import com.github.mphi_rc.fido2.authenticator.crypto.Ed25519AttestationKeyPair;
-import com.github.mphi_rc.fido2.authenticator.crypto.P256AttestationKeyPair;
+import com.github.mphi_rc.fido2.authenticator.keys.CredentialBackend;
+import com.github.mphi_rc.fido2.authenticator.keys.CredentialDescriptor;
+import com.github.mphi_rc.fido2.authenticator.keys.LegacySoftwareCredentialBackend;
 import com.github.mphi_rc.fido2.authenticator.user.UserVerifier;
 import com.github.mphi_rc.fido2.protocol.ctap2.*;
 import com.github.mphi_rc.fido2.protocol.usbhid.ChannelId;
@@ -24,7 +24,7 @@ public class Authenticator {
     private static final long ASSERTION_TIMEOUT = TimeUnit.SECONDS.toNanos(30);
     private static final ChannelId INTERNAL_CHANNEL = ImmutableChannelId.of(new byte[]{0, 0, 0, 1});
     private final ConfigurationFile config;
-    private final CredentialStore credentialStore;
+    private final CredentialBackend credentialBackend;
     private final PinState pinState;
     private final UserVerifier userVerifier;
     private final boolean residentKeysEnabled;
@@ -36,8 +36,13 @@ public class Authenticator {
     }
     public Authenticator(ConfigurationFile config, CredentialStore store, PinState pin,
             boolean residentKeysEnabled, LongSupplier clock) {
+        this(config, new LegacySoftwareCredentialBackend(store), pin, residentKeysEnabled, clock);
+    }
+    /** Explicit provider injection. No fallback when a provider is unavailable. */
+    public Authenticator(ConfigurationFile config, CredentialBackend backend, PinState pin,
+            boolean residentKeysEnabled, LongSupplier clock) {
         this.config = config;
-        credentialStore = store;
+        credentialBackend = java.util.Objects.requireNonNull(backend, "backend");
         pinState = pin;
         userVerifier = config.userVerifier();
         this.residentKeysEnabled = residentKeysEnabled;
@@ -55,32 +60,27 @@ public class Authenticator {
             return Result.err(Ctap2ResponseCode.UNSUPPORTED_OPTION);
         }
         if (!userVerifier.isRegistrationApproved(request.relayingPartyId())) return Result.err(Ctap2ResponseCode.OPERATION_DENIED);
-        for (Credential known : credentialStore.getCredentials(request.relayingPartyId())) {
+        for (CredentialDescriptor known : credentialBackend.find(request.relayingPartyId())) {
             if (containsId(request.excludedCredentialIds(), known.id())) return Result.err(Ctap2ResponseCode.CREDENTIAL_EXCLUDED);
         }
         Algorithm algorithm = config.enabledAlgorithms().stream()
-                .filter(a -> request.supportedAlgorithmIds().contains(a.getCoseAlgorithmId())).findFirst().orElse(null);
+                .filter(a -> credentialBackend.supportedAlgorithms().contains(a)
+                        && request.supportedAlgorithmIds().contains(a.getCoseAlgorithmId())).findFirst().orElse(null);
         if (algorithm == null) return Result.err(Ctap2ResponseCode.UNSUPPORTED_ALGORITHM);
         Optional<Ctap2ResponseCode> error = checkPin(request.clientDataHash(), request.pinAuth(), request.pinProtocolVersion(), true);
         if (error.isPresent()) return Result.err(error.get());
         boolean verified = request.pinAuth().isPresent(); // True only after successful checkPin.
-        AttestationKeyPair keys;
-        switch (algorithm) {
-            case P256_ECDSA: keys = P256AttestationKeyPair.generate(); break;
-            case Ed25519: keys = Ed25519AttestationKeyPair.generate(); break;
-            default: return Result.err(Ctap2ResponseCode.UNSUPPORTED_ALGORITHM);
-        }
-        final Credential credential;
+        final CredentialDescriptor credential;
         try {
-            credential = credentialStore.saveCredential(request.relayingPartyId(), request.userId(), keys,
+            credential = credentialBackend.create(request.relayingPartyId(), request.userId(), algorithm,
                     request.residentKeyRequested(), request.userName(), request.userDisplayName());
         } catch (CredentialStore.Full full) { return Result.err(Ctap2ResponseCode.KEY_STORE_FULL); }
         AuthenticatorData data = ImmutableAuthenticatorData.builder().relayingPartyId(request.relayingPartyId())
-                .attestedCredentialData(keys.encodeAttestedCredentialData(config.getAaguid(), credential.id()))
+                .attestedCredentialData(credential.encodeAttestedCredentialData(config.getAaguid()))
                 .isUserPresent(true).isUserVerified(verified).signatureCount(0).build();
         return Result.ok(ImmutableMakeCredentialResponse.builder().format("packed")
                 .algorithm(algorithm.getCoseAlgorithmId()).authData(data.asBytes())
-                .signature(keys.sign(data, request.clientDataHash())).build());
+                .signature(credentialBackend.signRegistration(credential.handle(), data, request.clientDataHash())).build());
     }
     public Result<MakeCredentialResponse, Ctap2ResponseCode> makeCredential(byte[] hash, String rpId,
             byte[] userId, Set<Integer> algorithms, Optional<byte[]> pinAuth) {
@@ -104,13 +104,13 @@ public class Authenticator {
         if (error.isPresent()) return Result.err(error.get());
         boolean discovery = request.publicKeyIds().isEmpty();
         if (discovery && !residentKeysEnabled) return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
-        List<Credential> eligible = credentialStore.getCredentials(request.relayingPartyId()).stream()
+        List<CredentialDescriptor> eligible = credentialBackend.find(request.relayingPartyId()).stream()
                 .filter(c -> discovery ? c.discoverable() : containsId(request.publicKeyIds(), c.id()))
-                .sorted(Comparator.comparingLong((Credential c) -> c.creation().toEpochMilli()).reversed()
+                .sorted(Comparator.comparingLong((CredentialDescriptor c) -> c.creation().toEpochMilli()).reversed()
                         .thenComparing((a, b) -> compareIds(a.id(), b.id()))).collect(Collectors.toList());
         if (eligible.isEmpty()) return Result.err(Ctap2ResponseCode.NO_CREDENTIALS);
         if (discovery && eligible.size() > CredentialStore.MAX_DISCOVERABLE_CREDENTIALS) return Result.err(Ctap2ResponseCode.LIMIT_EXCEEDED);
-        Credential first = eligible.get(0);
+        CredentialDescriptor first = eligible.get(0);
         if (counterExhausted(first)) return Result.err(Ctap2ResponseCode.OTHER);
         boolean verified = request.pinAuth().isPresent();
         int count = discovery && eligible.size() > 1 ? eligible.size() : 0;
@@ -128,7 +128,7 @@ public class Authenticator {
             return Result.err(Ctap2ResponseCode.NOT_ALLOWED);
         }
         byte[] id = sequence.ids.get(sequence.nextIndex);
-        Credential credential = credentialStore.getCredentials(sequence.rpId).stream()
+        CredentialDescriptor credential = credentialBackend.find(sequence.rpId).stream()
                 .filter(c -> c.discoverable() && Arrays.equals(c.id(), id)).findFirst().orElse(null);
         if (credential == null) { cancelAssertionSequence(); return Result.err(Ctap2ResponseCode.NOT_ALLOWED); }
         if (counterExhausted(credential)) { cancelAssertionSequence(); return Result.err(Ctap2ResponseCode.OTHER); }
@@ -140,11 +140,10 @@ public class Authenticator {
             return Result.ok(response);
         } catch (RuntimeException e) { cancelAssertionSequence(); throw e; }
     }
-    private GetAssertionResponse sign(Credential credential, byte[] hash, boolean present, boolean verified, int count) {
+    private GetAssertionResponse sign(CredentialDescriptor credential, byte[] hash, boolean present, boolean verified, int count) {
         AuthenticatorData data = ImmutableAuthenticatorData.builder().relayingPartyId(credential.relayingPartyId())
                 .isUserPresent(present).isUserVerified(verified).signatureCount(credential.signatureCount() + 1).build();
-        byte[] signature = credential.keyPair().sign(data, hash);
-        credentialStore.incrementCredentialCounter(credential.relayingPartyId(), credential.keyPair());
+        byte[] signature = credentialBackend.signAssertion(credential.handle(), data, hash);
         return ImmutableGetAssertionResponse.builder().credentialId(credential.id()).authData(data.asBytes())
                 .signature(signature).userId(credential.userId()).includeUser(credential.discoverable())
                 .userName(verified ? credential.userName() : "")
@@ -157,7 +156,7 @@ public class Authenticator {
         if (!protocol.isPresent() || protocol.get() != 1 || auth.get().length != 16) return Optional.of(Ctap2ResponseCode.PIN_AUTH_INVALID);
         return pinState.isPinAuthValid(hash, auth.get());
     }
-    private static boolean counterExhausted(Credential c) { return c.signatureCount() < 0 || c.signatureCount() == Integer.MAX_VALUE; }
+    private static boolean counterExhausted(CredentialDescriptor c) { return c.signatureCount() < 0 || c.signatureCount() == Integer.MAX_VALUE; }
     private static boolean containsId(List<byte[]> list, byte[] id) {
         for (byte[] candidate : list) if (Arrays.equals(candidate, id)) return true;
         return false;
@@ -180,9 +179,9 @@ public class Authenticator {
         final List<byte[]> ids = new ArrayList<>();
         int nextIndex = 1;
         long lastResponse;
-        Pending(byte[] channel, String rpId, byte[] hash, boolean present, boolean verified, List<Credential> credentials, long now) {
+        Pending(byte[] channel, String rpId, byte[] hash, boolean present, boolean verified, List<CredentialDescriptor> credentials, long now) {
             this.channel = channel.clone(); this.rpId = rpId; this.hash = hash.clone(); this.present = present; this.verified = verified;
-            for (Credential credential : credentials) ids.add(credential.id().clone());
+            for (CredentialDescriptor credential : credentials) ids.add(credential.id().clone());
             lastResponse = now;
         }
     }
