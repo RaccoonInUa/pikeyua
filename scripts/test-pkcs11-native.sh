@@ -3,19 +3,23 @@
 set -euo pipefail
 umask 077
 [[ $# == 2 && $1 == --software-tokens-only ]] || {
-  echo 'Usage: bash scripts/test-pkcs11-native.sh --software-tokens-only /absolute/test-classpath' >&2; exit 2;
+  echo 'Usage: dbus-run-session -- bash scripts/test-pkcs11-native.sh --software-tokens-only /absolute/test-classpath' >&2; exit 2;
 }
+[[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] || { echo 'Private session bus required' >&2; exit 2; }
 CP=$2
 WORK=$(mktemp -d /tmp/pikeyua-p11-ci-XXXXXXXX)
 PIDS=()
 cleanup() {
-  for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for ((i=${#PIDS[@]}-1;i>=0;i--)); do
+    kill "${PIDS[i]}" 2>/dev/null || true
+    wait "${PIDS[i]}" 2>/dev/null || true
+  done
   rm -rf -- "$WORK"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-for binary in java pkcs11-tool softhsm2-util swtpm tpm2_ptool tpm2_getcap; do
+for binary in java pkcs11-tool softhsm2-util swtpm tpm2-abrmd tpm2_ptool tpm2_getcap; do
   command -v "$binary" >/dev/null || { echo "Missing dependency: $binary" >&2; exit 2; }
 done
 SOFT=$(find /usr/lib -name libsofthsm2.so -type f -print -quit)
@@ -71,28 +75,40 @@ probe delete "$SOFT" "$SLOT" "$WORK/a.spki"
 probe absent "$SOFT" "$SLOT" "$WORK/a.spki"
 expect_failure probe verify /nonexistent/pikeyua-native.so "$SLOT" "$WORK/a.spki"
 
+select_sim() {
+  local name=$1
+  export TPM2TOOLS_TCTI="tabrmd:bus_type=session,bus_name=com.intel.tss2.Tabrmd.pikeyua${name}"
+  export TPM2_PKCS11_TCTI="$TPM2TOOLS_TCTI"
+  export TPM2_PKCS11_STORE="$WORK/tpm-$name/store"
+}
 start_sim() {
   local name=$1
-  mkdir -p "$WORK/$name/state" "$WORK/$name/store"
-  swtpm socket --tpm2 --tpmstate "dir=$WORK/$name/state" \
-    --server "type=unixio,path=$WORK/$name/tpm.sock" \
-    --ctrl "type=unixio,path=$WORK/$name/tpm.sock.ctrl" \
-    --flags not-need-init,startup-clear --daemon --pid "file=$WORK/$name/pid"
-  PIDS+=("$(cat "$WORK/$name/pid")")
-  export TPM2TOOLS_TCTI="swtpm:path=$WORK/$name/tpm.sock"
-  export TPM2_PKCS11_TCTI="$TPM2TOOLS_TCTI"
-  export TPM2_PKCS11_STORE="$WORK/$name/store"
-  [[ $TPM2TOOLS_TCTI == swtpm:path=/tmp/pikeyua-p11-ci-* ]] || exit 2
-  for attempt in {1..20}; do
+  mkdir -p "$WORK/tpm-$name/state" "$WORK/tpm-$name/store"
+  swtpm socket --tpm2 --tpmstate "dir=$WORK/tpm-$name/state" \
+    --server "type=unixio,path=$WORK/tpm-$name/tpm.sock" \
+    --ctrl "type=unixio,path=$WORK/tpm-$name/tpm.sock.ctrl" \
+    --flags not-need-init,startup-clear --daemon --pid "file=$WORK/tpm-$name/pid"
+  PIDS+=("$(cat "$WORK/tpm-$name/pid")")
+  local downstream="swtpm:path=$WORK/tpm-$name/tpm.sock"
+  [[ $downstream == swtpm:path=/tmp/pikeyua-p11-ci-* ]] || exit 2
+  # A simulator has no /dev/tpmrm0 kernel resource manager. Use an ephemeral
+  # user process on this private session bus, never a host service/device TCTI.
+  tpm2-abrmd --session --dbus-name="com.intel.tss2.Tabrmd.pikeyua${name}" \
+    --tcti="$downstream" > "$WORK/tpm-$name/resource-manager.log" 2>&1 &
+  PIDS+=("$!")
+  select_sim "$name"
+  for attempt in {1..50}; do
     if tpm2_getcap properties-fixed >/dev/null 2>&1; then return 0; fi
     sleep 0.1
   done
-  echo 'Software TPM did not start' >&2; exit 1
+  echo 'Software TPM resource manager did not start' >&2
+  cat "$WORK/tpm-$name/resource-manager.log" >&2
+  exit 1
 }
 echo 'TEST: tpm2-pkcs11 + independent software TPM instances (NOT physical TPM)'
-start_sim tpm-a
-# These commands mutate TPM state only in the explicitly selected disposable
-# simulator. NEVER use this script as a real TPM/Pi provisioning installer.
+start_sim a
+# These commands mutate only the explicitly selected disposable simulator.
+# NEVER use this script as a real TPM/Pi provisioning installer.
 tpm2_ptool init --path "$TPM2_PKCS11_STORE" > "$WORK/init-a.log"
 tpm2_ptool addtoken --pid=1 --sopin=123456789 --userpin=987654321 --label=pikeyua-lab \
   --path "$TPM2_PKCS11_STORE" > "$WORK/add-a.log"
@@ -100,7 +116,7 @@ T_SLOT=$(slot_for "$TPM")
 probe create "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 probe verify "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 cp -a "$TPM2_PKCS11_STORE" "$WORK/clone-store"
-start_sim tpm-b
+start_sim b
 tpm2_ptool init --path "$TPM2_PKCS11_STORE" > "$WORK/init-b.log"
 tpm2_ptool addtoken --pid=1 --sopin=123456789 --userpin=987654321 --label=pikeyua-lab \
   --path "$TPM2_PKCS11_STORE" > "$WORK/add-b.log"
@@ -110,13 +126,10 @@ probe verify "$TPM" "$TB_SLOT" "$WORK/tpm-b.spki"
 # Copy only the PKCS11 store, NOT the simulator seed/state, to another TPM.
 export TPM2_PKCS11_STORE="$WORK/clone-store"
 expect_failure probe verify "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
-# Positive controls before and after clone denial distinguish actual separation
-# from a broken simulator/native stack.
-export TPM2_PKCS11_STORE="$WORK/tpm-b/store"
+# Positive controls distinguish actual separation from a broken native stack.
+select_sim b
 probe verify "$TPM" "$TB_SLOT" "$WORK/tpm-b.spki"
-export TPM2TOOLS_TCTI="swtpm:path=$WORK/tpm-a/tpm.sock"
-export TPM2_PKCS11_TCTI="$TPM2TOOLS_TCTI"
-export TPM2_PKCS11_STORE="$WORK/tpm-a/store"
+select_sim a
 probe verify "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 probe delete "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 probe absent "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"

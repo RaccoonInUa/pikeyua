@@ -25,7 +25,7 @@ jobs:
       - name: Install native libraries into disposable runner only
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends softhsm2 opensc swtpm swtpm-tools tpm2-tools libtpm2-pkcs11-1 libtpm2-pkcs11-tools libtss2-tcti-swtpm0
+          sudo apt-get install -y --no-install-recommends softhsm2 opensc swtpm swtpm-tools tpm2-tools libtpm2-pkcs11-1 libtpm2-pkcs11-tools libtss2-tcti-swtpm0 libtss2-tcti-tabrmd0 tpm2-abrmd dbus
       - name: Build, unit tests and native syntax checks
         run: |
           gradle --no-daemon test shadowJar
@@ -33,6 +33,6 @@ jobs:
           python3 -m py_compile scripts/pikeyua-hardware-readiness.py
       - name: Real native libraries with software-only token fixtures
         run: |
-          bash scripts/test-pkcs11-native.sh --software-tokens-only "$PWD/build/classes/java/test:$PWD/build/libs/pikeyua.jar"
+          dbus-run-session -- bash scripts/test-pkcs11-native.sh --software-tokens-only "$PWD/build/classes/java/test:$PWD/build/libs/pikeyua.jar"
       - name: Read-only inventory on runner (not hardware evidence)
         run: python3 scripts/pikeyua-hardware-readiness.py
