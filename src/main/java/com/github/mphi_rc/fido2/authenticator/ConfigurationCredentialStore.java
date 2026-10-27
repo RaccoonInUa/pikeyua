@@ -6,25 +6,20 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.stream.Collectors;
-
 import com.github.mphi_rc.fido2.ConfigurationFile;
 import com.github.mphi_rc.fido2.authenticator.crypto.AttestationKeyPair;
 
 /** All modifications are published only after ConfigurationFile's durable write succeeds. */
 public class ConfigurationCredentialStore implements CredentialStore {
     private final ConfigurationFile config;
-
     public ConfigurationCredentialStore(ConfigurationFile config) { this.config = config; }
-
     @Override public Collection<Credential> getCredentials(String rpId) {
         return config.credentials().stream().filter(c -> c.relayingPartyId().equals(rpId))
                 .collect(Collectors.toList());
     }
-
     @Override public Credential saveCredential(String rpId, byte[] userId, AttestationKeyPair keys) {
         return saveCredential(rpId, userId, keys, false, "", "");
     }
-
     @Override public Credential saveCredential(String rpId, byte[] userId, AttestationKeyPair keys,
             boolean discoverable, String name, String displayName) {
         synchronized (config) {
@@ -34,8 +29,6 @@ public class ConfigurationCredentialStore implements CredentialStore {
                     .userName(name).userDisplayName(displayName).build();
             List<Credential> next = new ArrayList<>(config.credentials());
             if (discoverable) {
-                // Do NOT convert or delete a legacy non-RK credential for the same account.
-                // RK re-registration replaces only existing RK records for this exact tuple.
                 next.removeIf(c -> c.discoverable() && c.relayingPartyId().equals(rpId)
                         && Arrays.equals(c.userId(), userId));
                 if (next.stream().filter(Credential::discoverable).count()
@@ -46,7 +39,6 @@ public class ConfigurationCredentialStore implements CredentialStore {
             return added;
         }
     }
-
     @Override public void incrementCredentialCounter(String rpId, AttestationKeyPair keys) {
         synchronized (config) {
             List<Credential> next = new ArrayList<>(config.credentials());
@@ -63,6 +55,15 @@ public class ConfigurationCredentialStore implements CredentialStore {
                 }
             }
             throw new IllegalStateException("Credential disappeared before counter commit");
+        }
+    }
+    @Override public void deleteCredential(String rpId, byte[] id) {
+        synchronized (config) {
+            List<Credential> next = new ArrayList<>(config.credentials());
+            int before = next.size();
+            next.removeIf(c -> c.relayingPartyId().equals(rpId) && Arrays.equals(c.id(), id));
+            if (before - next.size() != 1) throw new IllegalStateException("Credential deletion refused");
+            config.updateAllStoredCredentials(next);
         }
     }
 }
