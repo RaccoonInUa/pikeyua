@@ -1,0 +1,38 @@
+name: Native PKCS11 qualification (software tokens)
+on:
+  pull_request:
+  push:
+    branches: [feature/pkcs11-tpm-qualification]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - name: Install native libraries into disposable runner only
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends softhsm2 opensc swtpm swtpm-tools tpm2-tools libtpm2-pkcs11-1 libtpm2-pkcs11-tools libtss2-tcti-swtpm0 libtss2-tcti-tabrmd0 tpm2-abrmd dbus
+      - name: Build, unit tests and native syntax checks
+        run: |
+          gradle --no-daemon test shadowJar
+          bash -n scripts/test-pkcs11-native.sh
+          python3 -m py_compile scripts/pikeyua-hardware-readiness.py
+      - name: Real native libraries with software-only token fixtures
+        run: |
+          dbus-run-session -- bash scripts/test-pkcs11-native.sh --software-tokens-only "$PWD/build/classes/java/test:$PWD/build/libs/pikeyua.jar"
+      - name: Read-only inventory on runner (not hardware evidence)
+        run: python3 scripts/pikeyua-hardware-readiness.py
