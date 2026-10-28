@@ -1,0 +1,49 @@
+name: Recovery laboratory
+on:
+  push:
+    branches: [feature/pkcs11-credential-backend]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-lab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  laboratory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - name: Build and test
+        run: |
+          cat > "$RUNNER_TEMP/lab.gradle" <<'EOF'
+          allprojects {
+            tasks.register('labDependencies', Copy) {
+              from configurations.testRuntimeClasspath
+              into layout.buildDirectory.dir('lab-dependencies')
+            }
+          }
+          EOF
+          gradle --no-daemon -I "$RUNNER_TEMP/lab.gradle" test shadowJar labDependencies
+      - name: Package source, tests and dependencies
+        run: |
+          mkdir -p build/recovery-lab
+          git archive --format=tar HEAD > build/recovery-lab/source.tar
+          cp build/libs/pikeyua.jar build/recovery-lab/
+          tar -cf build/recovery-lab/test-classes.tar -C build/classes/java/test .
+          tar -cf build/recovery-lab/dependencies.tar -C build/lab-dependencies .
+          printf '%s\n' "$(git rev-parse HEAD)" > build/recovery-lab/COMMIT.txt
+          printf '%s\n' 'LABORATORY ONLY. No Pi service installation; synthetic credentials only.' > build/recovery-lab/TEST_ONLY.txt
+          (cd build/recovery-lab && sha256sum source.tar pikeyua.jar test-classes.tar dependencies.tar > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pikeyua-recovery-lab
+          path: build/recovery-lab/
+          retention-days: 7
+          if-no-files-found: error
