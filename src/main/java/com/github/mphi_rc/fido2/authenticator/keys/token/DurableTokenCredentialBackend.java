@@ -232,10 +232,21 @@ public final class DurableTokenCredentialBackend implements CredentialBackend, A
         System.arraycopy(v, start, out, 32 - length, length); return out;
     }
     private void restore() throws Exception {
+        // A separate durable marker prevents missing/corrupted metadata from being
+        // silently mistaken for a first boot. Marker FIRST, state SECOND: an
+        // interrupted first-time initialization also refuses on next start.
+        Path marker = path.resolveSibling(path.getFileName().toString() + ".initialized");
+        final byte[] expected = "pikeyua-token-b2-v1".getBytes(StandardCharsets.US_ASCII);
         if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            if (Files.exists(marker, LinkOption.NOFOLLOW_LINKS))
+                throw new IllegalStateException("Previously initialized token metadata disappeared");
+            AtomicStateFile.write(marker, expected);
             publish(null, Collections.<Entry>emptyList());
             return;
         }
+        if (!Files.exists(marker, LinkOption.NOFOLLOW_LINKS)
+                || !Arrays.equals(expected, AtomicStateFile.read(marker)))
+            throw new IllegalStateException("Token initialization marker missing or invalid");
         JsonObject doc = new JsonParser().parse(new String(AtomicStateFile.read(path), StandardCharsets.UTF_8)).getAsJsonObject();
         if (!doc.has("version") || doc.get("version").getAsInt() != VERSION || !doc.has("entries")
                 || !doc.get("entries").isJsonArray() || !doc.has("pending"))
