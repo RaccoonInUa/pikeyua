@@ -156,14 +156,14 @@ public class DurableTokenCredentialBackendTest {
                 .relayingPartyId(RP).clientDataHash(HASH).userId(new byte[]{1,2})
                 .addSupportedAlgorithmIds(-7).residentKeyRequested(true).build();
             com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse registration=
-                authenticator.makeCredential(request).handleError(e->{throw new AssertionError("Registration denied");}).elseGet(x->x);
+                authenticator.makeCredential(request).<com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse>handleError(e->{throw new AssertionError("Registration denied");}).elseGet(x->x);
             CredentialDescriptor credential=backend.find(RP).iterator().next();
             assertArrayEquals(credential.id(),Arrays.copyOfRange(registration.authData(),55,87));
             com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionRequest assertion=
                 com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetAssertionRequest.builder()
                 .relayingPartyId(RP).clientDataHash(HASH).build();
             com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionResponse response=
-                authenticator.getAssertion(assertion).handleError(e->{throw new AssertionError("Assertion denied");}).elseGet(x->x);
+                authenticator.getAssertion(assertion).<com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionResponse>handleError(e->{throw new AssertionError("Assertion denied");}).elseGet(x->x);
             assertArrayEquals(credential.id(),response.credentialId());
             assertEquals(1,backend.find(RP).iterator().next().signatureCount());
             assertTrue(config.credentials().isEmpty());
