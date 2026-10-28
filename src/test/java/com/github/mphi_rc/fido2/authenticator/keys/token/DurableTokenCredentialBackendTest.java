@@ -158,7 +158,7 @@ public class DurableTokenCredentialBackendTest {
             com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse registration=
                 authenticator.makeCredential(request).handleError(e->{throw new AssertionError("Registration denied");}).elseGet(x->x);
             CredentialDescriptor credential=backend.find(RP).iterator().next();
-            assertArrayEquals(credential.id(),Arrays.copyOfRange(registration.authData(),53,85));
+            assertArrayEquals(credential.id(),Arrays.copyOfRange(registration.authData(),55,87));
             com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionRequest assertion=
                 com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetAssertionRequest.builder()
                 .relayingPartyId(RP).clientDataHash(HASH).build();
