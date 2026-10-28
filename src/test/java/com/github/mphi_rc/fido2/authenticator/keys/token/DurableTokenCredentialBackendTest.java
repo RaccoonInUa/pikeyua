@@ -169,4 +169,13 @@ public class DurableTokenCredentialBackendTest {
             assertTrue(config.credentials().isEmpty());
         }
     }
+    @Test public void missingMetadataCannotBeReinitialized() throws Exception {
+        Path file=state();
+        try(DurableTokenCredentialBackend backend=new DurableTokenCredentialBackend(file,new Fake())){
+            create(backend);
+        }
+        Files.move(file,file.resolveSibling("detached-metadata.json"));
+        try {new DurableTokenCredentialBackend(file,new Fake()); fail("Lost metadata silently replaced");}
+        catch(IllegalStateException expected){ assertFalse(Files.exists(file)); }
+    }
 }
