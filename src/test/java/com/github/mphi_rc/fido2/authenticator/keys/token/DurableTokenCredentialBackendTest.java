@@ -142,4 +142,31 @@ public class DurableTokenCredentialBackendTest {
             assertEquals(2,f.keys.size()); // obsolete object retained for operator reconciliation
         }
     }
+    @Test public void actualAuthenticatorUsesTokenBackendForRegistrationAndDiscovery() throws Exception {
+        Path file=state();Fake driver=new Fake();
+        Path legacy=file.getParent().resolve("config.json");
+        com.github.mphi_rc.fido2.ConfigurationFile config=new com.github.mphi_rc.fido2.ConfigurationFile(legacy);
+        config.persistToDisk();
+        com.github.mphi_rc.fido2.authenticator.PinState pin=new com.github.mphi_rc.fido2.authenticator.PinState(config);
+        try(DurableTokenCredentialBackend backend=new DurableTokenCredentialBackend(file,driver)) {
+            com.github.mphi_rc.fido2.authenticator.Authenticator authenticator=
+                new com.github.mphi_rc.fido2.authenticator.Authenticator(config,backend,pin,true,System::nanoTime);
+            com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialRequest request=
+                com.github.mphi_rc.fido2.protocol.ctap2.ImmutableMakeCredentialRequest.builder()
+                .relayingPartyId(RP).clientDataHash(HASH).userId(new byte[]{1,2})
+                .addSupportedAlgorithmIds(-7).residentKeyRequested(true).build();
+            com.github.mphi_rc.fido2.protocol.ctap2.MakeCredentialResponse registration=
+                authenticator.makeCredential(request).handleError(e->{throw new AssertionError("Registration denied");}).elseGet(x->x);
+            CredentialDescriptor credential=backend.find(RP).iterator().next();
+            assertArrayEquals(credential.id(),Arrays.copyOfRange(registration.authData(),53,85));
+            com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionRequest assertion=
+                com.github.mphi_rc.fido2.protocol.ctap2.ImmutableGetAssertionRequest.builder()
+                .relayingPartyId(RP).clientDataHash(HASH).build();
+            com.github.mphi_rc.fido2.protocol.ctap2.GetAssertionResponse response=
+                authenticator.getAssertion(assertion).handleError(e->{throw new AssertionError("Assertion denied");}).elseGet(x->x);
+            assertArrayEquals(credential.id(),response.credentialId());
+            assertEquals(1,backend.find(RP).iterator().next().signatureCount());
+            assertTrue(config.credentials().isEmpty());
+        }
+    }
 }
