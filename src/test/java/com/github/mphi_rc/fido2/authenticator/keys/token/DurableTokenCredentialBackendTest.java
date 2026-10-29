@@ -35,6 +35,12 @@ public class DurableTokenCredentialBackendTest {
             KeyPair p=keys.get(alias);if(p==null)throw new IllegalStateException("missing key");
             Signature s=Signature.getInstance("SHA256withECDSA");s.initSign(p.getPrivate());s.update(message);return s.sign();
         }
+        @Override public void deleteIfMatches(String alias, byte[] pinned) throws Exception {
+            KeyPair pair = keys.get(alias);
+            if (pair == null || !Arrays.equals(pinned, pair.getPublic().getEncoded()))
+                throw new IllegalStateException("Wrong or missing token key");
+            delete(alias);
+        }
         @Override public void delete(String alias) throws Exception {
             if(refuseDelete)throw new IllegalStateException("deletion refused");
             if(keys.remove(alias)==null)throw new IllegalStateException("missing key");
@@ -92,8 +98,10 @@ public class DurableTokenCredentialBackendTest {
             try {create(b);fail("Generation succeeded");}catch(IllegalStateException expected){}
             try {b.find(RP);fail("Uncertain backend still available");}catch(IllegalStateException expected){}
         }
-        try {new DurableTokenCredentialBackend(file,new Fake());fail("Unresolved intent ignored");}
-        catch(IllegalStateException expected){}
+        try (DurableTokenCredentialBackend recovered = new DurableTokenCredentialBackend(file,f)) {
+            assertTrue(recovered.find(RP).isEmpty());
+            assertEquals(Integer.valueOf(1), recovered.recoveryStatus().get("abortedCreates"));
+        }
         assertTrue(new String(Files.readAllBytes(file),StandardCharsets.UTF_8).contains("\"pending\""));
     }
     @Test public void singleOwnerLockAndReadonlyListing() throws Exception {
@@ -129,8 +137,13 @@ public class DurableTokenCredentialBackendTest {
             CredentialDescriptor c=create(b);f.refuseDelete=true;
             try{b.delete(c.handle());fail("Deletion succeeded");}catch(IllegalStateException expected){}
         }
-        try{new DurableTokenCredentialBackend(file,f);fail("Failed delete auto-reconciled");}
-        catch(IllegalStateException expected){}
+        try (DurableTokenCredentialBackend recovered = new DurableTokenCredentialBackend(file,f)) {
+            assertTrue(recovered.find(RP).isEmpty());
+            assertEquals(Integer.valueOf(1), recovered.recoveryStatus().get("pendingDeletions"));
+            f.refuseDelete = false;
+            assertEquals(1, recovered.reconcileDeletedObjects());
+            assertEquals(Integer.valueOf(0), recovered.recoveryStatus().get("pendingDeletions"));
+        }
     }
     @Test public void discoverableReplacementKeepsOnlyNewMetadata() throws Exception {
         Path file=state();Fake f=new Fake();
@@ -169,13 +182,20 @@ public class DurableTokenCredentialBackendTest {
             assertTrue(config.credentials().isEmpty());
         }
     }
-    @Test public void missingMetadataCannotBeReinitialized() throws Exception {
-        Path file=state();
-        try(DurableTokenCredentialBackend backend=new DurableTokenCredentialBackend(file,new Fake())){
-            create(backend);
+    @Test public void missingMetadataIsRestoredOnlyFromNewestRedo() throws Exception {
+        Path file=state(); Fake driver = new Fake(); CredentialDescriptor original;
+        try(DurableTokenCredentialBackend backend=new DurableTokenCredentialBackend(file,driver)){
+            original=create(backend);
+            backend.signAssertion(original.handle(),data(original,false),HASH);
         }
         Files.move(file,file.resolveSibling("detached-metadata.json"));
-        try {new DurableTokenCredentialBackend(file,new Fake()); fail("Lost metadata silently replaced");}
-        catch(IllegalStateException expected){ assertFalse(Files.exists(file)); }
+        try(DurableTokenCredentialBackend recovered=new DurableTokenCredentialBackend(file,driver)) {
+            CredentialDescriptor c=recovered.find(RP).iterator().next();
+            assertArrayEquals(original.id(),c.id()); assertEquals(1,c.signatureCount());
+            assertEquals(Integer.valueOf(1),recovered.recoveryStatus().get("replayedSnapshots"));
+        }
+        Files.delete(file); Files.delete(file.resolveSibling(file.getFileName()+".redo"));
+        try {new DurableTokenCredentialBackend(file,driver);fail("Both lost snapshots silently replaced");}
+        catch(IllegalStateException expected){assertFalse(Files.exists(file));}
     }
 }

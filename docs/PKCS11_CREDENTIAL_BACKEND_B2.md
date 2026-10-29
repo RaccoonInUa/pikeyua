@@ -1,42 +1,51 @@
-# B2 — isolated PKCS#11 FIDO credential lifecycle (laboratory candidate)
+# B2 — isolated PKCS#11 credential backend and recovery laboratory
 
-Status: source integration and synthetic tests; **not deployed on Pi Zero W**. Based on B1 head `0dc9d2b3ac52dd16f86310dacd3be84b668db747` (PR #9).
+Status: experimental candidate; not deployed on Pi Zero W. Based on B1
+`0dc9d2b3ac52dd16f86310dacd3be84b668db747` (PR #9). Per-commit verification belongs in PR #10.
 
-## Purpose
+The current recovery contract, one-command laboratory runner, test coverage and explicit
+limitations are in [TOKEN_RECOVERY_B2.md](TOKEN_RECOVERY_B2.md). This replaces the earlier
+pending-marker-only design, which deliberately refused all operations after an interruption.
 
-B1 validated an external PKCS#11 signing primitive. B2 introduces a `CredentialBackend` using that primitive, with new hardware-style P-256 credentials represented by public descriptors, opaque aliases, and metadata persisted in a **separate** 0600 JSON file in a 0700 directory.
+## Components
 
-- `TokenKeyDriver`: create, sign, delete. Its interface never exports raw private-key bytes.
-- `Pkcs11TokenKeyDriver`: generate P-256 key pairs within the selected provider and create alias metadata certificates through that same provider. Such certificates are **not WebAuthn/FIDO attestation** and never leave as manufacturer proof.
-- `DurableTokenCredentialBackend`: create, find, self-attestation registration signing, counter-committed assertion signing, and explicit deletion.
-- `Authenticator` already accepts an explicitly injected `CredentialBackend` from phase A. Existing deployed constructors continue using the legacy software backend.
-- The **deployed CLI does not select this provider**. Do not install this lab candidate over V7.3.
+- `TokenKeyDriver` isolates generation, signing and public-key-bound deletion.
+- `Pkcs11TokenKeyDriver` implements the interface with the explicit native provider. Its
+  self-signed alias certificate is Java KeyStore metadata, NOT FIDO attestation.
+- `DurableTokenCredentialBackend` keeps only public credential data and token references
+  in a separate schema-2 state file and a newest-generation redo snapshot.
+- `TokenStateFile` flushes file contents, atomically renames and flushes the parent directory.
+- `Authenticator` can use this backend by explicit injection. Installed FIDO CLI constructors
+  still use the original software backend; there is no silent fallback or automatic migration.
 
-## Fail-closed persistence
+## Recovery behavior
 
-The backend owns one lock file for the full process lifetime. Before generating or deleting token objects, it persists a pending intent using `AtomicStateFile` (file flush, atomic rename, parent directory flush). An interrupted/uncertain mutation causes refusal on startup until manual reconciliation. An absent token or wrong alias never triggers software-key fallback.
-
-Assertions verify a signature with the stored public key, then durably advance their stored counters **before** returning the signature. A failed counter write poisons that backend process. This cannot make dual-file/token transitions fully atomic: token object creation and JSON publication are different persistence domains; crash or storage uncertainty requires conservative owner reconciliation.
-
-Discoverable replacement removes prior **metadata** after the new record is published but intentionally leaves old native key objects for explicit orphan cleanup. There is no automatic deletion after publication because a crash or misidentified alias could destroy a live credential. This means native token storage consumption must be monitored.
-
-The state file contains public SPKI/COSE key bytes, ID, RP, user metadata, alias, created time and counter. It must not contain raw private key bytes. The native PKCS#11 database is a separate store with protected blobs and may contain sensitive metadata; do not treat it as publicly shareable.
+A durable redo snapshot is written before current. Interrupted publication rolls forward;
+older backups are never used to regress counters or resurrect deleted credentials.
+Incomplete create intents preserve all previous entries and quarantine the incomplete alias.
+Deletion commits a pinned tombstone before native cleanup; failure to confirm cleanup does
+not revive that credential or prevent unrelated accounts from being used after reopen.
+An explicit owner operation retries only bound, already-deleted objects. Unknown orphans
+and superseded keys are not automatically destroyed. Conflicting snapshots, lost redo and
+unsafe file metadata refuse operation rather than guessing. See the detailed contract.
 
 ## Qualification
 
-- Seven synthetic JUnit cases cover create/sign/reopen, no software fallback with wrong token, pending-marker refusal after uncertain generation/deletion, single-writer locking, stale counter rejection, and discoverable replacement.
-- `Pkcs11B2Probe` executes against disposable SoftHSM2 and swtpm + tpm2-pkcs11 native libraries, with separate JVM phases for create, verify, delete and absent state. Independent ECDSA verification checks the actual signed bytes.
-- Full Java CI (JDK17+21), original-V7.3 compatibility, and native software-token workflows must pass for the exact head SHA.
-- No test proves Java PIN/user-presence policy against compromised Linux, physical non-extractability, real SPI/ARMv6 compatibility, hardware restart latency or acceptance by a third-party site.
+The suite includes strict state-validation tests, 23 actual forced-child-termination scenarios,
+and four independent-JVM CTAP CBOR phases covering ClientPIN, RK/UV, GetNextAssertion,
+`up:false`, PIN change/revocation and deletion. Native CI additionally executes the CTAP
+phases and six recovery checkpoints with SoftHSM and tpm2-pkcs11 + swtpm. Java 17/21 and
+original V7.3 compatibility workflows must pass for the exact published head.
 
-## Remaining engineering work for daily use
+The downloadable laboratory bundle runs without root and only with synthetic credentials.
+It does not read real FIDO state, install services or packages, or open USB/TPM devices.
+Do not deploy the laboratory JAR over the working V7.3 service after a lab PASS.
 
-1. Verify readiness on the actual ARMv6 Pi, confirm exact SPI TPM firmware, vendor advisories and 3.3 V wiring.
-2. Qualify token and metadata persistence over power loss, not just process termination. Verify no orphan handling can erase live credentials.
-3. Run actual CTAP2 CBOR registration/authorization end to end with injected B2 backend, including ClientPIN UV, RK, GetNextAssertion, and silent up=false probes.
-4. Define operator-safe, audit-backed pending-intent reconciliation with independent key checks before any deletion.
-5. Add explicit provider selection in a **separate** staging CLI and versioned metadata transitions; never default an old credential into hardware.
-6. Design trusted user presence and token-backed PIN/retry enforcement. TPM-backed signatures alone do not make a complete FIDO hardware key.
-7. Verify genuine model attestation and service acceptance independently. No vendor AAGUID spoofing.
+## Remaining physical and security qualification
 
-All test tokens and PINs are synthetic. Existing Pi service, credentials, GPIO and network configuration have not been touched.
+Actual ARMv6 runtime and native ABI, SPI wiring and TPM firmware, physical power cuts and
+SD-controller behavior, USB/browser integration, and original-chip versus copied-SD tests
+remain separate. Linux-controlled PIN and simulated user presence are not trusted hardware
+policy. Whole-card failure, malicious root rollback and loss of a non-exportable private key
+cannot be solved by this redo file. Model attestation and third-party site acceptance also
+remain independent requirements; no vendor identity is impersonated.

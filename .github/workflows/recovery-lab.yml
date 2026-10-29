@@ -31,6 +31,16 @@ jobs:
           }
           EOF
           gradle --no-daemon -I "$RUNNER_TEMP/lab.gradle" test shadowJar labDependencies
+      - name: Forced-process recovery and actual CBOR protocol tests
+        run: |
+          CP="$PWD/build/classes/java/test:$PWD/build/libs/pikeyua.jar"
+          java -cp "$CP" com.github.mphi_rc.fido2.authenticator.keys.token.TokenRecoveryProbe
+          WORK=$(mktemp -d /tmp/pikeyua-ctap-ci-XXXXXXXX)
+          trap 'rm -rf -- "$WORK"' EXIT
+          chmod 700 "$WORK"
+          for phase in create verify final remaining; do
+            java -cp "$CP" com.github.mphi_rc.fido2.TokenCtapProbe --software-token "$phase" file-fixture 0 /dev/null "$WORK"
+          done
       - name: Package source, tests and dependencies
         run: |
           mkdir -p build/recovery-lab
@@ -39,8 +49,15 @@ jobs:
           tar -cf build/recovery-lab/test-classes.tar -C build/classes/java/test .
           tar -cf build/recovery-lab/dependencies.tar -C build/lab-dependencies .
           printf '%s\n' "$(git rev-parse HEAD)" > build/recovery-lab/COMMIT.txt
-          printf '%s\n' 'LABORATORY ONLY. No Pi service installation; synthetic credentials only.' > build/recovery-lab/TEST_ONLY.txt
-          (cd build/recovery-lab && sha256sum source.tar pikeyua.jar test-classes.tar dependencies.tar > SHA256SUMS)
+          jar cf build/recovery-lab/pikeyua-lab-tests.jar -C build/classes/java/test .
+          cp build/lab-dependencies/junit-4.12.jar build/lab-dependencies/hamcrest-core-1.3.jar build/recovery-lab/
+          cp scripts/verify-recovery-lab.sh scripts/verify-persistence.sh scripts/verify-v72-migration.sh scripts/pikeyua-hardware-readiness.py build/recovery-lab/
+          find src/test/java \( -name '*Test.java' -o -name '*Tests.java' \) | sed 's|^src/test/java/||;s|/|.|g;s|\.java$||' | sort > build/recovery-lab/TEST_CLASSES.txt
+          cp docs/TOKEN_RECOVERY_B2.md build/recovery-lab/README.md
+          printf '%s\n' 'LABORATORY ONLY. Run bash verify-recovery-lab.sh WITHOUT sudo; no Pi service installation.' > build/recovery-lab/TEST_ONLY.txt
+          (cd build/recovery-lab && sha256sum *.jar *.tar *.sh *.py *.md *.txt > SHA256SUMS)
+      - name: Run the packaged suite without root
+        run: bash build/recovery-lab/verify-recovery-lab.sh
       - uses: actions/upload-artifact@v4
         with:
           name: pikeyua-recovery-lab

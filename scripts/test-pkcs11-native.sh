@@ -48,6 +48,16 @@ b2probe() {
   java -cp "$CP" com.github.mphi_rc.fido2.authenticator.keys.pkcs11.Pkcs11B2Probe \
     --disposable-token "$1" "$2" "$3" "$WORK/pin" "$4"
 }
+ctap_recovery() {
+  local library=$1 slot=$2 name=$3
+  mkdir -m 700 "$WORK/ctap-$name"
+  for phase in create verify final remaining; do
+    java -cp "$CP" com.github.mphi_rc.fido2.TokenCtapProbe \
+      --software-token "$phase" "$library" "$slot" "$WORK/pin" "$WORK/ctap-$name"
+  done
+  java -cp "$CP" com.github.mphi_rc.fido2.authenticator.keys.token.TokenRecoveryProbe \
+    --software-native "$library" "$slot" "$WORK/pin"
+}
 expect_failure() {
   if "$@" > "$WORK/expected-failure.log" 2>&1; then
     echo 'FAIL: negative control unexpectedly succeeded' >&2; exit 1
@@ -71,6 +81,7 @@ b2probe create "$SOFT" "$SLOT" "$WORK/b2-soft"
 b2probe verify "$SOFT" "$SLOT" "$WORK/b2-soft"
 b2probe delete "$SOFT" "$SLOT" "$WORK/b2-soft"
 b2probe absent "$SOFT" "$SLOT" "$WORK/b2-soft"
+ctap_recovery "$SOFT" "$SLOT" soft
 pkcs11-tool --module "$SOFT" --slot "$SLOT" --login --pin 987654321 --list-objects > "$WORK/objects.txt"
 grep -q 'never extractable' "$WORK/objects.txt"
 echo 'PASS: PKCS11 token reports never-extractable key attribute (not physical proof)'
@@ -145,7 +156,8 @@ b2probe create "$TPM" "$T_SLOT" "$WORK/b2-tpm"
 b2probe verify "$TPM" "$T_SLOT" "$WORK/b2-tpm"
 b2probe delete "$TPM" "$T_SLOT" "$WORK/b2-tpm"
 b2probe absent "$TPM" "$T_SLOT" "$WORK/b2-tpm"
+ctap_recovery "$TPM" "$T_SLOT" tpm
 probe delete "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 probe absent "$TPM" "$T_SLOT" "$WORK/tpm-a.spki"
 echo 'PASS: native PKCS11 persistence, signatures, wrong-token/clone denial and deletion'
-echo 'NOT TESTED: physical TPM, ARMv6, trusted PIN/touch, FIDO integration, physical anti-extraction'
+echo 'NOT TESTED: physical TPM, ARMv6, trusted PIN/touch, physical power cuts, USB/browser integration, physical anti-extraction'

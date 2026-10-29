@@ -74,6 +74,22 @@ public final class Pkcs11TokenKeyDriver implements TokenKeyDriver {
         store.deleteEntry(alias);
         if (store.containsAlias(alias)) throw new IllegalStateException("PKCS11 alias still present");
     }
+    @Override public synchronized void deleteIfMatches(String alias, byte[] expectedPublicKey) throws Exception {
+        alias(alias);
+        synchronized (token) {
+            KeyStore store = token.qualificationStore();
+            java.security.cert.Certificate cert = store.getCertificate(alias);
+            if (cert == null || expectedPublicKey == null
+                    || !java.util.Arrays.equals(expectedPublicKey, cert.getPublicKey().getEncoded()))
+                throw new IllegalStateException("Pinned deletion key is absent or differs");
+            // Verify actual private-key ownership, not just a replacement certificate.
+            byte[] challenge = new byte[32]; new java.security.SecureRandom().nextBytes(challenge);
+            byte[] proof = token.sign(new Pkcs11P256Signer.Reference(alias, expectedPublicKey), challenge);
+            java.util.Arrays.fill(proof, (byte) 0);
+            store.deleteEntry(alias);
+            if (store.containsAlias(alias)) throw new IllegalStateException("Native deletion unconfirmed");
+        }
+    }
     private X509Certificate aliasCertificate(KeyPair pair) throws Exception {
         AlgorithmIdentifier algorithm = new AlgorithmIdentifier(X9ObjectIdentifiers.ecdsa_with_SHA256);
         V3TBSCertificateGenerator generator = new V3TBSCertificateGenerator();
