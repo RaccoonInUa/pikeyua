@@ -17,6 +17,9 @@ jobs:
         java: ['17', '21']
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -29,7 +32,7 @@ jobs:
       - name: Existing mocked cutover regressions
         run: bash scripts/test-cutover-mock.sh
       - name: Test and assemble
-        run: gradle --no-daemon test shadowJar
+        run: gradle --no-daemon --no-build-cache clean test shadowJar
       - name: Summarize unit results
         run: |
           python3 - <<'PY'
