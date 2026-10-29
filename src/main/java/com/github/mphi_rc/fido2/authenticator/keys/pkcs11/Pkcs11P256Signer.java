@@ -158,8 +158,8 @@ public final class Pkcs11P256Signer implements AutoCloseable {
 
     // Package access is for the isolated qualification harness only. Public API
     // never returns the KeyStore, Provider or private-key object.
-    KeyStore qualificationStore() { return store; }
-    Provider qualificationProvider() { return provider; }
+    KeyStore qualificationStore() { if (closed) throw new IllegalStateException("Token closed"); return store; }
+    Provider qualificationProvider() { if (closed) throw new IllegalStateException("Token closed"); return provider; }
 
     @Override public synchronized void close() throws Exception {
         if (!closed) {

@@ -1,0 +1,94 @@
+name: Recovery laboratory
+on:
+  push:
+    branches: [feature/pkcs11-credential-backend]
+permissions:
+  contents: read
+concurrency:
+  group: recovery-lab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  laboratory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.8'
+      - name: Assert exact source and toolchain
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          java -version
+          gradle --version
+      - name: Build and test
+        run: |
+          cat > "$RUNNER_TEMP/lab.gradle" <<'EOF'
+          allprojects {
+            tasks.register('labDependencies', Copy) {
+              from configurations.testRuntimeClasspath
+              into layout.buildDirectory.dir('lab-dependencies')
+            }
+          }
+          EOF
+          gradle --no-daemon --no-build-cache -I "$RUNNER_TEMP/lab.gradle" clean test shadowJar labDependencies
+      - name: Forced-process recovery and actual CBOR protocol tests
+        run: |
+          CP="$PWD/build/classes/java/test:$PWD/build/libs/pikeyua.jar"
+          java -cp "$CP" com.github.mphi_rc.fido2.authenticator.keys.token.TokenRecoveryProbe
+          WORK=$(mktemp -d /tmp/pikeyua-ctap-ci-XXXXXXXX)
+          trap 'rm -rf -- "$WORK"' EXIT
+          chmod 700 "$WORK"
+          for phase in create verify final remaining; do
+            java -cp "$CP" com.github.mphi_rc.fido2.TokenCtapProbe --software-token "$phase" file-fixture 0 /dev/null "$WORK"
+          done
+      - name: Package source, tests and dependencies
+        run: |
+          mkdir -p build/recovery-lab
+          git archive --format=tar HEAD > build/recovery-lab/source.tar
+          cp build/libs/pikeyua.jar build/recovery-lab/
+          tar -cf build/recovery-lab/test-classes.tar -C build/classes/java/test .
+          tar -cf build/recovery-lab/dependencies.tar -C build/lab-dependencies .
+          printf '%s\n' "$(git rev-parse HEAD)" > build/recovery-lab/COMMIT.txt
+          jar cf build/recovery-lab/pikeyua-lab-tests.jar -C build/classes/java/test .
+          cp build/lab-dependencies/junit-4.12.jar build/lab-dependencies/hamcrest-core-1.3.jar build/recovery-lab/
+          cp scripts/verify-recovery-lab.sh scripts/verify-persistence.sh scripts/verify-v72-migration.sh scripts/pikeyua-hardware-readiness.py build/recovery-lab/
+          find src/test/java \( -name '*Test.java' -o -name '*Tests.java' \) | sed 's|^src/test/java/||;s|/|.|g;s|\.java$||' | sort > build/recovery-lab/TEST_CLASSES.txt
+          cp docs/TOKEN_RECOVERY_B2.md build/recovery-lab/README.md
+          printf 'Published commit: %s\nSource tree: %s\nRuntime: Java %s\nBuild: clean Gradle 8.8, no task build-cache; sources and generated classes rebuilt.\nNot qualified: physical TPM, ARMv6, USB/browser, actual power removal, trusted hardware PIN/UP.\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" '${{ matrix.java }}' > build/recovery-lab/BUILD_INFO.md
+          printf '%s\n' 'LABORATORY ONLY. Run bash verify-recovery-lab.sh WITHOUT sudo; no Pi service installation.' > build/recovery-lab/TEST_ONLY.txt
+          (cd build/recovery-lab && sha256sum *.jar *.tar *.sh *.py *.md *.txt > SHA256SUMS)
+      - name: Run the packaged suite without root
+        run: |
+          set -o pipefail
+          bash build/recovery-lab/verify-recovery-lab.sh 2>&1 | tee build/recovery-lab/ci-verification.log
+      - name: Preserve test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-test-results-jdk${{ matrix.java }}
+          path: |
+            build/test-results/
+            build/reports/tests/
+            build/recovery-lab/ci-verification.log
+          retention-days: 14
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pikeyua-recovery-lab-jdk${{ matrix.java }}
+          path: build/recovery-lab/
+          retention-days: 7
+          if-no-files-found: error

@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,7 +28,7 @@ jobs:
         with:
           gradle-version: '8.8'
       - name: Build and test candidate
-        run: gradle --no-daemon test shadowJar
+        run: gradle --no-daemon --no-build-cache clean test shadowJar
       - name: Checkout exact previously tested V7.3
         uses: actions/checkout@v4
         with:
